@@ -10,6 +10,7 @@ const { errorHandler, notFound } = require('./middleware/errorHandler');
 // Import routes
 const sessionRoutes = require('./routes/sessionRoutes');
 const healthRoutes = require('./routes/healthRoutes');
+const geminiRoutes = require('./routes/geminiRoutes');
 
 // Create Express app
 const app = express();
@@ -66,6 +67,7 @@ app.use((req, res, next) => {
 // API routes
 app.use('/api/session', sessionRoutes);
 app.use('/api/health', healthRoutes);
+app.use('/api/gemini', geminiRoutes);
 
 // Root endpoint
 app.get('/', (req, res) => {
@@ -76,6 +78,7 @@ app.get('/', (req, res) => {
     endpoints: {
       health: '/api/health',
       sessions: '/api/session',
+      gemini: '/api/gemini',
       websocket: `ws${config.server.env === 'production' ? 's' : ''}://${req.get('host')}`
     },
     documentation: {

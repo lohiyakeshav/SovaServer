@@ -1,6 +1,6 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/errorHandler');
-const GeminiService = require('../services/GeminiService');
+const GeminiLiveService = require('../services/GeminiLiveService');
 const sessionManager = require('../services/SessionManager');
 const config = require('../config/environment');
 
@@ -19,8 +19,12 @@ router.get('/', asyncHandler(async (req, res) => {
 
 // Detailed health check
 router.get('/detailed', asyncHandler(async (req, res) => {
-  const geminiService = new GeminiService();
-  const geminiConfig = await geminiService.validateConfiguration();
+  const geminiLiveService = new GeminiLiveService();
+  
+  // Wait for initialization
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  
+  const geminiConfig = await geminiLiveService.validateConfiguration();
   
   const health = {
     success: true,
@@ -36,7 +40,9 @@ router.get('/detailed', asyncHandler(async (req, res) => {
     services: {
       gemini: {
         configured: geminiConfig.isValid,
-        model: config.gemini.model,
+        model: geminiConfig.model,
+        voice: geminiConfig.voice,
+        connected: geminiConfig.isConnected,
         error: geminiConfig.error || null
       },
       sessions: sessionManager.getStatistics()
@@ -55,14 +61,18 @@ router.get('/detailed', asyncHandler(async (req, res) => {
 
 // Readiness check
 router.get('/ready', asyncHandler(async (req, res) => {
-  const geminiService = new GeminiService();
-  const geminiConfig = await geminiService.validateConfiguration();
+  const geminiLiveService = new GeminiLiveService();
+  
+  // Wait for initialization
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  
+  const geminiConfig = await geminiLiveService.validateConfiguration();
   
   if (!geminiConfig.isValid) {
     res.status(503).json({
       success: false,
       status: 'not_ready',
-      reason: 'Gemini API configuration invalid',
+      reason: 'Gemini Live API configuration invalid',
       error: geminiConfig.error
     });
     return;

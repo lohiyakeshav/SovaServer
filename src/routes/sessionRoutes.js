@@ -1,7 +1,6 @@
 const express = require('express');
 const { asyncHandler, ApiError } = require('../middleware/errorHandler');
 const sessionManager = require('../services/SessionManager');
-const GeminiService = require('../services/GeminiService');
 const logger = require('../utils/logger');
 
 const router = express.Router();

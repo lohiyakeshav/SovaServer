@@ -1,4 +1,4 @@
-const GeminiService = require('../services/GeminiService');
+const GeminiLiveService = require('../services/GeminiLiveService');
 const config = require('../config/environment');
 const logger = require('./logger');
 
@@ -27,37 +27,47 @@ async function testSetup() {
     console.error('   ❌ Logger Error:', error.message);
   }
 
-  // Test 3: Gemini API Connection
-  console.log('\n3️⃣  Testing Gemini API Connection...');
+  // Test 3: Gemini Live API Connection
+  console.log('\n3️⃣  Testing Gemini Live API Connection...');
   try {
-    const geminiService = new GeminiService();
-    const validation = await geminiService.validateConfiguration();
+    const geminiLiveService = new GeminiLiveService();
+    
+    // Wait for initialization
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    
+    const validation = await geminiLiveService.validateConfiguration();
     
     if (validation.isValid) {
-      console.log('   ✅ Gemini API connection successful');
-      console.log(`   ✅ Available models: ${validation.availableModels.length}`);
-      console.log(`   ✅ Current model: ${validation.currentModel}`);
+      console.log('   ✅ Gemini Live API connection successful');
+      console.log(`   ✅ Model: ${validation.model}`);
+      console.log(`   ✅ Voice: ${validation.voice}`);
+      console.log(`   ✅ Connected: ${validation.isConnected}`);
     } else {
-      console.error('   ❌ Gemini API Error:', validation.error);
+      console.error('   ❌ Gemini Live API Error:', validation.error);
     }
   } catch (error) {
-    console.error('   ❌ Failed to connect to Gemini API:', error.message);
+    console.error('   ❌ Failed to connect to Gemini Live API:', error.message);
   }
 
-  // Test 4: Create test chat session
-  console.log('\n4️⃣  Testing Chat Session Creation...');
+  // Test 4: Test Live API functionality
+  console.log('\n4️⃣  Testing Live API Functionality...');
   try {
-    const geminiService = new GeminiService();
-    const chat = await geminiService.createChatSession('test-session');
-    console.log('   ✅ Chat session created successfully');
+    const geminiLiveService = new GeminiLiveService();
     
-    // Test a simple text interaction
-    const result = await chat.sendMessage('Hello, what is Revolt Motors?');
-    const response = await result.response;
-    console.log('   ✅ Test message sent and response received');
-    console.log(`   📝 Response preview: ${response.text().substring(0, 100)}...`);
+    // Wait for initialization
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    if (geminiLiveService.isConnected) {
+      console.log('   ✅ Live API session is connected');
+      
+      // Test text input
+      await geminiLiveService.sendTextInput('Hello, this is a test message.', 'test-session');
+      console.log('   ✅ Text input sent successfully');
+    } else {
+      console.log('   ⚠️  Live API session not connected, skipping text test');
+    }
   } catch (error) {
-    console.error('   ❌ Chat Session Error:', error.message);
+    console.error('   ❌ Live API Test Error:', error.message);
   }
 
   console.log('\n✨ Setup test complete!\n');

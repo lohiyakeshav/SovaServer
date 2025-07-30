@@ -11,11 +11,16 @@ class EnvironmentConfig {
   }
 
   validateRequiredEnvVars() {
-    const required = ['GEMINI_API_KEY'];
-    const missing = required.filter(key => !process.env[key]);
-    
-    if (missing.length > 0) {
-      throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
+    // Check if at least one API key is available
+    const availableKeys = [
+      process.env.GEMINI_API_KEY,
+      process.env.BACKUP_KEY,
+      process.env.BACKUP_KEY_ONE,
+      process.env.BACKUP_KEY_TWO,
+    ].filter(key => key && key.trim() !== '');
+
+    if (availableKeys.length === 0) {
+      throw new Error('Missing required environment variables: At least one of GEMINI_API_KEY, BACKUP_KEY, BACKUP_KEY_ONE, or BACKUP_KEY_TWO must be set');
     }
   }
 
@@ -23,14 +28,19 @@ class EnvironmentConfig {
     return {
       gemini: {
         apiKey: process.env.GEMINI_API_KEY,
-        model: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+        backupKeys: [
+          process.env.BACKUP_KEY,
+          process.env.BACKUP_KEY_ONE,
+          process.env.BACKUP_KEY_TWO
+        ].filter(key => key && key.trim() !== ''),
+        model: process.env.GEMINI_MODEL || 'gemini-2.0-flash-live-001',
         maxTokens: parseInt(process.env.GEMINI_MAX_TOKENS) || 2048,
         temperature: parseFloat(process.env.GEMINI_TEMPERATURE) || 0.7,
       },
       // Gemini 2.5 TTS is free and uses the same API key
       tts: {
         model: 'gemini-2.5-flash-preview-tts',
-        voice: process.env.TTS_VOICE || 'Kore', // Default voice
+        voice: process.env.TTS_VOICE || 'Orus', // Default voice (Orus is often clearer)
       },
       server: {
         port: parseInt(process.env.PORT) || 3000,

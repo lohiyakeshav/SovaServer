@@ -2,10 +2,10 @@
   "name": "sova-server",
   "version": "1.0.0",
   "description": "Sova Voice Interface Backend - Real-time voice chat with Gemini Live API",
-  "main": "src/server.js",
+  "main": "src/server-live.js",
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "nodemon src/server.js",
+    "start": "node src/server-live.js",
+    "dev": "nodemon src/server-live.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:setup": "node src/utils/testSetup.js",
     "lint": "eslint src/",
@@ -21,6 +21,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@google/genai": "^1.11.0",
     "@google/generative-ai": "^0.21.0",
     "compression": "^1.7.5",
     "cors": "^2.8.5",
