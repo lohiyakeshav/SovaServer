@@ -2,8 +2,18 @@ const express = require('express');
 const router = express.Router();
 const logger = require('../utils/logger');
 
-// Health check endpoint
+// Simple health check for Render
 router.get('/', (req, res) => {
+  res.status(200).json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
+// Health check endpoint
+router.get('/health', (req, res) => {
   try {
     const health = {
       status: 'healthy',

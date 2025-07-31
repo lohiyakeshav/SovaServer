@@ -85,7 +85,42 @@ server.listen(PORT, HOST, () => {
     }
   }, 300000); // Clean up every 5 minutes
   
-  console.log(`
+  // Different startup message for production vs development
+  if (config.server.env === 'production') {
+    console.log(`
+╔═══════════════════════════════════════════════════════════════╗
+║                                                               ║
+║   🎙️  Sova Voice Interface Backend (Gemini Live)              ║
+║                                                               ║
+║   Server Status: ONLINE                                       ║
+║   Environment: production                                    ║
+║   HTTP Server: http://0.0.0.0:${PORT}                        ║
+║   WebSocket: ws://0.0.0.0:${PORT}                             ║
+║                                                               ║
+║   Gemini Live Model: gemini-2.5-flash-preview-native-audio   ║
+║   Voice: ${(config.tts?.voice || 'Orus').padEnd(45)}║
+║                                                               ║
+║   API Endpoints:                                              ║
+║   - Health Check: /api/health                                 ║
+║   - Sessions: /api/session                                    ║
+║                                                               ║
+║   WebSocket Events:                                           ║
+║   - start-conversation                                        ║
+║   - audio-chunk                                               ║
+║   - text-input (for testing)                                  ║
+║   - stop-speaking                                             ║
+║   - interrupt                                                 ║
+║   - end-conversation                                          ║
+║                                                               ║
+║   Admin Endpoints:                                            ║
+║   - /admin (WebSocket namespace)                              ║
+║   - get-service-status                                        ║
+║   - test-text                                                 ║
+║                                                               ║
+╚═══════════════════════════════════════════════════════════════╝
+    `);
+  } else {
+    console.log(`
 ╔═══════════════════════════════════════════════════════════════╗
 ║                                                               ║
 ║   🎙️  Sova Voice Interface Backend (Gemini Live)              ║
@@ -116,7 +151,8 @@ server.listen(PORT, HOST, () => {
 ║   - test-text                                                 ║
 ║                                                               ║
 ╚═══════════════════════════════════════════════════════════════╝
-  `);
+    `);
+  }
 }).on('error', (error) => {
   if (error.code === 'EADDRINUSE') {
     logger.error(`Port ${PORT} is already in use. Please stop the existing server or use a different port.`, {

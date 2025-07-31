@@ -44,7 +44,7 @@ class EnvironmentConfig {
       },
       server: {
         port: parseInt(process.env.PORT) || 3000,
-        host: process.env.HOST || 'localhost',
+        host: process.env.NODE_ENV === 'production' ? '0.0.0.0' : (process.env.HOST || 'localhost'),
         env: process.env.NODE_ENV || 'development',
       },
       cors: {
