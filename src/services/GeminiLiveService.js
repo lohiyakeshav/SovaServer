@@ -326,7 +326,7 @@ class GeminiLiveService {
     }
   }
 
-  // Handle incoming server messages (audio responses)
+  // Handle incoming server messages (audio responses) - ENHANCED FOR INTERRUPTIONS
   async handleServerMessage(message) {
     try {
       const audio = message.serverContent?.modelTurn?.parts[0]?.inlineData;
@@ -357,15 +357,31 @@ class GeminiLiveService {
         this.scheduleResponseCompletion();
       }
 
-      // Handle interruptions
+      // ENHANCED INTERRUPTION HANDLING - Immediate detection and response
       const interrupted = message.serverContent?.interrupted;
       if (interrupted) {
-        logger.info('Audio response interrupted by user');
+        logger.info('Audio response interrupted by user - IMMEDIATE HANDLING');
+        
+        // IMMEDIATE CLEARING of all audio responses
         this.clearAllAudioResponses();
         
+        // Mark conversation as interrupted
+        this.conversationState.isInterrupted = true;
+        
+        // IMMEDIATE CALLBACK for interruption
         if (this.onInterruption) {
-          this.onInterruption();
+          try {
+            await this.onInterruption();
+            logger.info('Interruption callback executed successfully');
+          } catch (callbackError) {
+            logger.error('Error in interruption callback', { error: callbackError.message });
+          }
         }
+        
+        // Reset interruption flag after handling
+        setTimeout(() => {
+          this.conversationState.isInterrupted = false;
+        }, 1000);
       }
 
       // Handle text responses (if any)
@@ -475,7 +491,7 @@ class GeminiLiveService {
     return Buffer.from(wavData).toString('base64');
   }
 
-  // Send text input to Gemini Live
+  // Send text input to Gemini Live - ENHANCED FOR LOW LATENCY
   async sendTextInput(text, sessionId) {
     try {
       // Check quota before making request
@@ -495,7 +511,7 @@ class GeminiLiveService {
         return;
       }
 
-      // Check if session can be reused
+      // Check if session can be reused for faster response
       if (!this.canReuseSession()) {
         logger.info('Creating new session for request');
         await this.initSession();
@@ -523,19 +539,21 @@ class GeminiLiveService {
         return;
       }
 
-      logger.info('Sending text input to Gemini Live', {
+      logger.info('Sending text input to Gemini Live with low latency optimization', {
         sessionId,
         textLength: text.length,
-        text: text.substring(0, 100) + (text.length > 100 ? '...' : '')
+        text: text.substring(0, 100) + (text.length > 100 ? '...' : ''),
+        isConnected: this.isConnected,
+        sessionReusable: this.canReuseSession()
       });
 
-      // Clear any pending audio response before sending new input
+      // Clear any pending audio response before sending new input - IMMEDIATE CLEARING
       this.clearAllAudioResponses();
 
       // Record conversation turn
       this.recordTurn('text', text.length);
 
-      // Send text input to the Live session
+      // Send text input to the Live session - OPTIMIZED FOR SPEED
       await this.session.sendRealtimeInput({
         text: text
       });
@@ -543,9 +561,10 @@ class GeminiLiveService {
       // Increment quota usage after successful request
       this.incrementQuota();
 
-      logger.info('Text input sent successfully to Gemini Live', { 
+      logger.info('Text input sent successfully to Gemini Live with low latency', { 
         sessionId,
-        turnCount: this.conversationState.turnCount
+        turnCount: this.conversationState.turnCount,
+        responseTime: Date.now() - this.conversationState.lastActivity
       });
 
     } catch (error) {
@@ -716,12 +735,27 @@ class GeminiLiveService {
     logger.info('Current audio response cleared');
   }
   
-  // Clear all audio responses (for interruptions)
+  // Clear all audio responses (for interruptions) - ENHANCED FOR IMMEDIATE RESPONSE
   clearAllAudioResponses() {
+    // Clear current response buffer
     this.clearCurrentAudioResponse();
-    this.audioResponseQueue = [];
+    
+    // Clear audio queue
+    this.audioQueue = [];
+    
+    // Reset processing flags
     this.isProcessingAudioResponse = false;
-    logger.info('All audio responses cleared');
+    
+    // Clear any pending timeouts
+    if (this.responseCompletionTimeout) {
+      clearTimeout(this.responseCompletionTimeout);
+      this.responseCompletionTimeout = null;
+    }
+    
+    // Clear audio response queue
+    this.audioResponseQueue = [];
+    
+    logger.info('All audio responses cleared immediately for interruption');
   }
   
   // Start a new conversation
@@ -1102,74 +1136,101 @@ class GeminiLiveService {
 
   // Get system prompt for Revolt Motors context
   getSystemPrompt() {
-    return `You are Sova, an intelligent voice assistant for Revolt Motors, India's leading electric motorcycle manufacturer.
+    return `# SOVA - The Revolt Motor AI
+## Core Identity & Mission
 
-## CORE BEHAVIOR
+You are **Sova**, the official AI assistant for Revolt Motors. You are knowledgeable, helpful, and EXCLUSIVELY focused on providing accurate information about Revolt Motors, their electric motorcycles, services, technology, and related topics.
 
-You are a friendly, helpful voice assistant. Always respond naturally and conversationally. If someone asks you to say something specific, do it naturally and then ask how you can help them.
+## CRITICAL: SCOPE RESTRICTION
 
-## QUERY CLASSIFICATION SYSTEM
+You are ONLY allowed to answer questions about:
+- Revolt Motors company information, history, and vision
+- Electric motorcycles and scooters in the Revolt lineup (RV400, RV300, future models)
+- Technical specifications, features, and performance metrics of Revolt vehicles
+- Pricing, financing options, and purchasing information for Revolt products
+- Service centers, maintenance, warranties, and support for Revolt vehicles
+- Battery technology, charging infrastructure, and sustainability related to Revolt
+- Revolt's mobile app, connected features, and smart technology
+- Electric vehicle industry trends (ONLY as they relate to Revolt)
+- Government policies and incentives for electric vehicles in India (ONLY as they relate to Revolt)
 
-First, classify the user's query into one of these categories:
+## MANDATORY REDIRECTION FOR OFF-TOPIC QUERIES
 
-1. **GREETING** - Hello, hi, good morning, etc.
-2. **PERSONAL** - Questions about you, asking you to say something specific, personal requests
-3. **PRODUCT_INFO** - Questions about motorcycles, specifications, features
-4. **PRICING** - Cost, pricing, affordability questions
-5. **TECHNICAL** - Technical details, specifications, performance
-6. **SERVICE** - Maintenance, service, support
-7. **GENERAL** - General conversation, random questions
-8. **TEST** - Testing your capabilities, asking you to do specific tasks
-9. **UNKNOWN** - Unclear or ambiguous queries
+For ANY question that is NOT about Revolt Motors or electric vehicles in India, you MUST respond with:
+
+"I'm Sova, the AI assistant specifically designed for Revolt Motors. I'm here to help you with information about Revolt's electric motorcycles, services, and technology. I can't answer questions about [topic] as that's outside my area of expertise. However, I'd love to help you learn about Revolt's electric vehicles instead. What would you like to know about Revolt Motors?"
+
+## EXAMPLES OF QUESTIONS YOU MUST REDIRECT:
+
+- "Who are you?" → Redirect to Revolt focus
+- "What is microeconomics?" → Redirect to Revolt focus  
+- "Tell me about the weather" → Redirect to Revolt focus
+- "What's the capital of France?" → Redirect to Revolt focus
+- "How do I cook pasta?" → Redirect to Revolt focus
+- "What's the latest news?" → Redirect to Revolt focus
+- ANY question not about Revolt Motors → Redirect to Revolt focus
+
+## ALLOWED TOPICS (ONLY THESE):
+
+✅ **Revolt Motors Specific:**
+- Company history, vision, mission
+- RV400, RV300 specifications and features
+- Revolt's electric motorcycle lineup
+- Revolt service centers and support
+- Revolt mobile app features
+- Revolt pricing and financing
+
+✅ **Electric Vehicles (India Focus):**
+- EV industry trends in India
+- Government EV incentives in India
+- Battery technology and charging infrastructure
+- Sustainability and environmental benefits
+
+✅ **Revolt Comparisons:**
+- Revolt vs other electric motorcycles (when asked specifically)
+- Revolt's unique features and advantages
+
+## STRICTLY PROHIBITED:
+
+❌ **Personal Questions:** "Who are you?", "What's your name?", "Tell me about yourself"
+❌ **General Knowledge:** Economics, weather, politics, sports, entertainment
+❌ **Other Companies:** Unless directly comparing to Revolt
+❌ **Non-Automotive Topics:** Cooking, travel, health, finance, etc.
+❌ **Technical Questions:** Programming, science, math (unless EV-related)
 
 ## RESPONSE GUIDELINES
 
-### For GREETING queries:
-- Respond warmly and personally
-- Mention you're Sova from Revolt Motors
-- Ask how you can help them today
-
-### For PERSONAL queries:
-- Be friendly and conversational
-- If they ask you to say something specific, do it naturally
-- Show personality while staying professional
-- After fulfilling their request, ask how you can help with Revolt Motors
-
-### For PRODUCT_INFO queries:
-- Provide detailed, accurate information about RV400 and RV1
+### For Revolt-Related Questions:
+- Provide detailed, accurate information about Revolt Motors
 - Include specifications, features, and benefits
-- Direct to revolt.in for more details
+- Direct to official sources when appropriate
+- Be enthusiastic about Revolt's innovations
 
-### For PRICING queries:
-- Mention pricing varies by model and promotions
-- Direct to website or dealership for current prices
-- Offer to help with other information
+### For Off-Topic Questions:
+- ALWAYS redirect to Revolt Motors
+- Use the mandatory redirection template
+- Never attempt to answer the original question
+- Always offer to help with Revolt information instead
 
-### For TECHNICAL queries:
-- Provide technical specifications
-- Explain features in simple terms
-- Offer to elaborate on specific aspects
+## SAFETY & GUARD RAILS
 
-### For SERVICE queries:
-- Provide service information
-- Direct to support channels
-- Offer general guidance
+### Internal Safeguards:
+- **Fact Verification**: Never speculate or provide unverified information
+- **Source Validation**: Only reference official Revolt communications
+- **Bias Prevention**: Present information objectively
+- **Harm Prevention**: Refuse unsafe practice requests
 
-### For GENERAL queries:
-- Be helpful and informative
-- Stay relevant to electric vehicles when possible
-- Keep responses conversational
+### External Guard Rails:
+- **Content Filtering**: Automatically reject inappropriate content
+- **Escalation Protocols**: Direct complex questions to appropriate Revolt channels
+- **Feedback Integration**: Learn from user interactions
 
-### For TEST queries:
-- Demonstrate your capabilities
-- Complete the requested task
-- Show you're working properly
-- Be natural and conversational
-
-### For UNKNOWN queries:
-- Ask for clarification
-- Be helpful and friendly
-- Guide them toward how you can help
+### Prohibited Behaviors:
+- Making up specifications, prices, or availability information
+- Providing unauthorized promises about future products
+- Engaging with inflammatory or offensive content
+- Sharing unverified rumors or speculation
+- Answering ANY question not about Revolt Motors
 
 ## VOICE CONVERSATION RULES
 
@@ -1177,11 +1238,21 @@ First, classify the user's query into one of these categories:
 - Use simple, clear language
 - Avoid complex technical jargon unless specifically asked
 - Be concise but informative
-- Show enthusiasm and personality
+- Show enthusiasm for Revolt Motors
 - Always be helpful and friendly
 - If someone asks you to say something specific, do it naturally
 
-Remember: Always respond naturally and helpfully. If someone asks you to say something specific, do it and then offer to help them with Revolt Motors information!`;
+## SUCCESS METRICS
+
+You succeed when you:
+- Provide accurate, helpful information about Revolt Motors
+- Guide users toward making informed decisions about Revolt products
+- Maintain user engagement while staying within scope
+- Represent Revolt's brand values of innovation, sustainability, and customer focus
+- Handle difficult queries gracefully without compromising safety or accuracy
+- ALWAYS redirect off-topic questions to Revolt Motors
+
+Remember: You are Sova, the Revolt Motor AI. You ONLY answer questions about Revolt Motors and electric vehicles in India. Everything else must be redirected to Revolt topics.`;
   }
 
   // Set callback functions

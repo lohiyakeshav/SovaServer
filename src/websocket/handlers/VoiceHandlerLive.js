@@ -11,10 +11,10 @@ class VoiceHandlerLive {
     
     // CONVERSATION-OPTIMIZED CHUNKING CONFIGURATION
     this.chunkingConfig = {
-      // Target chunk duration for natural conversation flow
-      targetChunkDuration: 2.0, // 2 seconds per chunk for natural speech
-      minChunkDuration: 1.0,    // Minimum 1 second
-      maxChunkDuration: 5.0,    // Maximum 5 seconds
+      // Target chunk duration for natural conversation flow - OPTIMIZED FOR LOW LATENCY
+      targetChunkDuration: 1.0, // Reduced to 1 second for faster response
+      minChunkDuration: 0.5,    // Minimum 0.5 seconds for immediate feedback
+      maxChunkDuration: 3.0,    // Maximum 3 seconds for natural flow
       
       // Audio parameters (48kHz, 16-bit, mono)
       sampleRate: 48000,
@@ -22,20 +22,32 @@ class VoiceHandlerLive {
       bitsPerSample: 16,
       bytesPerSecond: 48000 * 1 * 2, // 96,000 bytes/second
       
-      // Transmission settings
-      sequentialDelay: 50,  // Reduced from 150ms to 50ms
-      multiportDelay: 10,   // Keep fast multiport
-      maxConcurrentChunks: 12
+      // Transmission settings - OPTIMIZED FOR LOW LATENCY
+      sequentialDelay: 25,  // Reduced from 50ms to 25ms for faster streaming
+      multiportDelay: 5,    // Reduced from 10ms to 5ms for faster multiport
+      maxConcurrentChunks: 16, // Increased for better parallelization
+      
+      // LATENCY OPTIMIZATION SETTINGS
+      immediateFirstChunk: true, // Send first chunk immediately
+      progressiveChunking: true, // Use smaller chunks for faster start
+      adaptiveDelay: true, // Adjust delays based on network conditions
+      maxLatencyTarget: 1500 // Target 1.5 seconds max latency
     };
     
-    // Multiport chunking configuration
+    // Multiport chunking configuration - ENHANCED FOR LOW LATENCY
     this.multiportConfig = {
       enabled: true, // ENABLE EFFICIENT MULTIPORT
-      maxPorts: 3, // Match frontend ports (0,1,2)
+      maxPorts: 4, // Increased from 3 to 4 ports for better distribution
       chunkDistribution: 'round-robin', // Distribute chunks across ports
       portBase: 3000, // Base port for multiport connections
       chunkDelay: this.chunkingConfig.multiportDelay, // Use optimized delay
-      maxConcurrentChunks: this.chunkingConfig.maxConcurrentChunks
+      maxConcurrentChunks: this.chunkingConfig.maxConcurrentChunks,
+      
+      // LATENCY OPTIMIZATION
+      parallelTransmission: true, // Enable true parallel transmission
+      adaptivePorts: true, // Dynamically adjust port usage
+      immediateStart: true, // Start transmission immediately
+      progressiveChunking: true // Use smaller initial chunks
     };
     
     // Track multiport connections
@@ -387,42 +399,76 @@ class VoiceHandlerLive {
           continue;
         }
         
+        // Check if session was interrupted
+        if (sessionInfo.isInterrupted) {
+          logger.info('Session was interrupted, skipping audio response', { sessionId });
+          sessionInfo.isInterrupted = false; // Reset flag
+          continue;
+        }
+        
         logger.info('Received complete audio response from Gemini Live', {
           sessionId,
           audioDataSize: audioData.length,
           activeSessionsCount: this.activeSessions.size
         });
           
-        // Calculate optimal chunk size for this audio response
+        // Calculate optimal chunk size for this audio response - OPTIMIZED FOR LOW LATENCY
         const optimalChunkSize = this.calculateOptimalChunkSize(audioData);
         
         // Split the complete audio response into chunks of optimal size
         const chunks = this.splitAudioIntoChunks(audioData, optimalChunkSize);
         
-        logger.info('Streaming audio response to client', {
+        logger.info('Streaming audio response to client with low latency optimization', {
           sessionId,
           totalChunks: chunks.length,
           averageChunkSize: Math.round(audioData.length / chunks.length),
-          chunkDuration: (optimalChunkSize / this.chunkingConfig.bytesPerSecond).toFixed(2) + 's'
+          chunkDuration: (optimalChunkSize / this.chunkingConfig.bytesPerSecond).toFixed(2) + 's',
+          latencyTarget: this.chunkingConfig.maxLatencyTarget + 'ms'
         });
 
-        // Stream chunks using EFFICIENT MULTIPORT
-        if (this.multiportConfig.enabled) {
-          await this.streamChunksMultiport(socket, sessionId, chunks);
-        } else {
-          // Use improved sequential transmission
-          await this.streamChunksSequential(socket, sessionId, chunks);
+        // IMMEDIATE FIRST CHUNK TRANSMISSION for low latency
+        if (this.chunkingConfig.immediateFirstChunk && chunks.length > 0) {
+          // Send first chunk immediately for instant feedback
+          socket.emit('audio-chunk', {
+            sessionId,
+            chunkIndex: 0,
+            totalChunks: chunks.length,
+            isLastChunk: chunks.length === 1,
+            audioData: chunks[0],
+            progress: '0%',
+            isFirstChunk: true,
+            immediate: true
+          });
+          
+          logger.info('Immediate first chunk sent for low latency', {
+            sessionId,
+            chunkSize: chunks[0].length
+          });
+          
+          // Remove first chunk from array since it's already sent
+          chunks.shift();
+        }
+
+        // Stream remaining chunks using EFFICIENT MULTIPORT
+        if (chunks.length > 0) {
+          if (this.multiportConfig.enabled) {
+            await this.streamChunksMultiport(socket, sessionId, chunks);
+          } else {
+            // Use improved sequential transmission with reduced delays
+            await this.streamChunksSequential(socket, sessionId, chunks);
+          }
         }
 
         // Send completion signal
         socket.emit('audio-complete', {
           sessionId,
-          totalChunks: chunks.length
+          totalChunks: chunks.length + (this.chunkingConfig.immediateFirstChunk ? 1 : 0),
+          latencyOptimized: true
         });
         
-        logger.info('Audio response completed successfully', {
+        logger.info('Audio response completed successfully with low latency optimization', {
           sessionId,
-          totalChunks: chunks.length
+          totalChunks: chunks.length + (this.chunkingConfig.immediateFirstChunk ? 1 : 0)
         });
       }
     } catch (error) {
@@ -477,7 +523,7 @@ class VoiceHandlerLive {
     }
   }
   
-  // Stream chunks using TRUE PARALLEL MULTIPORT
+  // Stream chunks using TRUE PARALLEL MULTIPORT - ENHANCED FOR LOW LATENCY
   async streamChunksMultiport(socket, sessionId, chunks) {
     try {
       // Initialize multiport connections if not already done
@@ -488,11 +534,12 @@ class VoiceHandlerLive {
       const connections = this.multiportConnections.get(sessionId);
       const totalChunks = chunks.length;
       
-      logger.info('Starting TRUE PARALLEL multiport streaming', {
+      logger.info('Starting TRUE PARALLEL multiport streaming with low latency optimization', {
         sessionId,
         totalChunks,
         portCount: this.multiportConfig.maxPorts,
-        maxConcurrent: this.multiportConfig.maxConcurrentChunks
+        maxConcurrent: this.multiportConfig.maxConcurrentChunks,
+        parallelTransmission: this.multiportConfig.parallelTransmission
       });
       
       // DISTRIBUTE CHUNKS ACROSS PORTS FOR PARALLEL TRANSMISSION
@@ -508,16 +555,18 @@ class VoiceHandlerLive {
         });
       }
       
-      // TRANSMIT CHUNKS IN PARALLEL ACROSS ALL PORTS
+      // TRANSMIT CHUNKS IN TRUE PARALLEL ACROSS ALL PORTS - OPTIMIZED FOR LOW LATENCY
       const transmissionPromises = portChunks.map(async (portChunkList, portId) => {
         for (let j = 0; j < portChunkList.length; j++) {
           const { chunk, index, isLastChunk } = portChunkList[j];
           
-          // Add small stagger per port to prevent overwhelming
+          // REDUCED DELAY FOR LOWER LATENCY
           const portDelay = portId * this.multiportConfig.chunkDelay;
-          await new Promise(resolve => setTimeout(resolve, portDelay));
+          if (portDelay > 0) {
+            await new Promise(resolve => setTimeout(resolve, portDelay));
+          }
           
-          // Emit chunk with port information
+          // Emit chunk with port information and latency optimization flags
           socket.emit('audio-chunk', {
             sessionId,
             chunkIndex: index,
@@ -526,7 +575,9 @@ class VoiceHandlerLive {
             audioData: chunk,
             progress: Math.round(((index + 1) / chunks.length) * 100) + '%',
             portId: portId,
-            portNumber: this.multiportConfig.portBase + portId
+            portNumber: this.multiportConfig.portBase + portId,
+            latencyOptimized: true,
+            parallelTransmission: true
           });
           
           // Update port statistics
@@ -535,29 +586,33 @@ class VoiceHandlerLive {
             connections.ports[portId].lastChunkTime = Date.now();
           }
           
-          logger.debug('PARALLEL chunk transmitted', {
+          logger.debug('PARALLEL chunk transmitted with low latency', {
             sessionId,
             chunkIndex: index,
             portId,
             portNumber: this.multiportConfig.portBase + portId,
-            totalChunks
+            totalChunks,
+            delay: portDelay + 'ms'
           });
           
-          // Minimal delay for parallel transmission
-          await new Promise(resolve => setTimeout(resolve, 10));
+          // MINIMAL DELAY FOR TRUE PARALLEL TRANSMISSION
+          if (j < portChunkList.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 5)); // Reduced from 10ms to 5ms
+          }
         }
       });
       
-      // EXECUTE ALL PORT TRANSMISSIONS IN PARALLEL
+      // EXECUTE ALL PORT TRANSMISSIONS IN TRUE PARALLEL
       await Promise.all(transmissionPromises);
       
-      logger.info('TRUE PARALLEL multiport streaming completed', {
+      logger.info('TRUE PARALLEL multiport streaming completed with low latency', {
         sessionId,
         totalChunks,
         portStats: connections?.ports.map(p => ({
           portId: p.portId,
           chunkCount: p.chunkCount
-        }))
+        })),
+        latencyOptimized: true
       });
       
     } catch (error) {
@@ -572,46 +627,51 @@ class VoiceHandlerLive {
     }
   }
 
-  // Stream chunks sequentially with improved reliability
+  // Stream chunks sequentially with improved reliability - ENHANCED FOR LOW LATENCY
   async streamChunksSequential(socket, sessionId, chunks) {
     try {
-      logger.info('Starting sequential chunk streaming', {
+      logger.info('Starting sequential chunk streaming with low latency optimization', {
         sessionId,
         totalChunks: chunks.length,
-        chunkSize: chunks[0]?.length || 0
+        chunkSize: chunks[0]?.length || 0,
+        sequentialDelay: this.chunkingConfig.sequentialDelay + 'ms'
       });
       
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
         const isLastChunk = i === chunks.length - 1;
         
-        // Emit chunk with improved error handling
+        // Emit chunk with improved error handling and latency optimization
         socket.emit('audio-chunk', {
           sessionId,
           chunkIndex: i,
           totalChunks: chunks.length,
           isLastChunk,
           audioData: chunk,
-          progress: Math.round(((i + 1) / chunks.length) * 100) + '%'
+          progress: Math.round(((i + 1) / chunks.length) * 100) + '%',
+          latencyOptimized: true,
+          sequentialTransmission: true
         });
 
-        logger.debug('Sequential chunk transmitted', {
+        logger.debug('Sequential chunk transmitted with low latency', {
           sessionId,
           chunkIndex: i,
           totalChunks: chunks.length,
           isLastChunk,
-          chunkSize: chunk.length
+          chunkSize: chunk.length,
+          delay: this.chunkingConfig.sequentialDelay + 'ms'
         });
 
-        // Ensure sequential transmission with optimized delay
+        // REDUCED DELAY FOR LOWER LATENCY - Only delay if not the last chunk
         if (!isLastChunk) {
           await new Promise(resolve => setTimeout(resolve, this.chunkingConfig.sequentialDelay));
         }
       }
       
-      logger.info('Sequential chunk streaming completed', {
+      logger.info('Sequential chunk streaming completed with low latency', {
         sessionId,
-        totalChunks: chunks.length
+        totalChunks: chunks.length,
+        latencyOptimized: true
       });
       
     } catch (error) {
@@ -684,36 +744,64 @@ class VoiceHandlerLive {
 
       logger.logWebSocketEvent('interrupt', socket.id, data);
 
-      // Clear any pending audio processing
+      // IMMEDIATE INTERRUPTION RESPONSE - Send instant confirmation
+      socket.emit('interruption-confirmed', {
+        sessionId: session.id,
+        timestamp: new Date().toISOString(),
+        message: 'Interruption received, stopping AI response'
+      });
+
+      // Clear any pending audio processing IMMEDIATELY
       const sessionInfo = this.activeSessions.get(session.id);
       if (sessionInfo) {
         sessionInfo.isProcessing = false;
         sessionInfo.audioQueue = [];
+        sessionInfo.isInterrupted = true; // Mark as interrupted
       }
 
       // Clear audio buffer for this session
-      if (this.audioBuffers.has(session.id)) {
+      if (this.audioBuffers && this.audioBuffers.has(session.id)) {
         this.audioBuffers.delete(session.id);
         logger.info('Cleared audio buffer due to interruption', { sessionId: session.id });
       }
 
-      // Clear audio queue in Gemini Live service
+      // Clear audio queue in Gemini Live service IMMEDIATELY
       this.geminiLiveService.clearAudioQueue();
 
-      // Send interruption to Gemini Live session
+      // Send interruption to Gemini Live session with enhanced error handling
       if (this.geminiLiveService.session) {
         try {
-          this.geminiLiveService.session.interrupt();
+          // Use the native Gemini Live interruption method
+          await this.geminiLiveService.session.interrupt();
           logger.info('Sent interruption to Gemini Live session', { sessionId: session.id });
+          
+          // Send immediate confirmation of successful interruption
+          socket.emit('interruption-successful', {
+            sessionId: session.id,
+            timestamp: new Date().toISOString(),
+            message: 'AI response stopped successfully'
+          });
         } catch (interruptError) {
           logger.warn('Failed to interrupt Gemini session', { error: interruptError.message });
+          
+          // Even if Gemini interruption fails, we've cleared local buffers
+          socket.emit('interruption-partial', {
+            sessionId: session.id,
+            timestamp: new Date().toISOString(),
+            message: 'Local audio stopped, but AI may continue briefly',
+            error: interruptError.message
+          });
         }
       }
 
-      // Send confirmation to client
+      // Update session state to reflect interruption
+      session.recordInterruption();
+
+      // Send final confirmation to client
       socket.emit('interruption-handled', {
         sessionId: session.id,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        status: 'complete'
       });
 
       logger.info('User interruption handled successfully', { sessionId: session.id });
@@ -722,6 +810,13 @@ class VoiceHandlerLive {
       logger.error('Failed to handle interruption', {
         sessionId: session?.id,
         socketId: socket.id,
+        error: error.message
+      });
+      
+      // Send error notification to client
+      socket.emit('interruption-error', {
+        sessionId: session?.id,
+        timestamp: new Date().toISOString(),
         error: error.message
       });
     }
@@ -875,48 +970,70 @@ class VoiceHandlerLive {
     }
   }
 
-  // Calculate optimal chunk size based on audio duration
+  // Calculate optimal chunk size based on audio duration - ENHANCED FOR LOW LATENCY
   calculateOptimalChunkSize(audioData) {
     try {
       const audioBuffer = Buffer.from(audioData, 'base64');
       const totalDuration = this.estimateAudioDuration(audioData);
       
-      // Calculate target chunk size based on duration
+      // PROGRESSIVE CHUNKING FOR LOW LATENCY
       let targetChunkDuration = this.chunkingConfig.targetChunkDuration;
       
-      // Adjust chunk duration based on total audio length
-      if (totalDuration <= 3.0) {
-        // Short responses: use larger chunks (1-2 seconds)
-        targetChunkDuration = Math.max(1.0, totalDuration / 2);
+      // Adjust chunk duration based on total audio length for optimal latency
+      if (totalDuration <= 2.0) {
+        // Very short responses: use smaller chunks (0.5-1 second) for immediate feedback
+        targetChunkDuration = Math.max(0.5, totalDuration / 3);
+      } else if (totalDuration <= 5.0) {
+        // Short responses: use 1-1.5 second chunks for fast response
+        targetChunkDuration = Math.max(1.0, totalDuration / 4);
       } else if (totalDuration <= 10.0) {
-        // Medium responses: use 2-3 second chunks
-        targetChunkDuration = 2.5;
+        // Medium responses: use 1.5-2 second chunks
+        targetChunkDuration = 1.8;
       } else {
-        // Long responses: use 3-5 second chunks
-        targetChunkDuration = Math.min(5.0, totalDuration / 4);
+        // Long responses: use 2-3 second chunks but start with smaller ones
+        targetChunkDuration = Math.min(3.0, totalDuration / 5);
       }
       
       // Calculate chunk size in bytes
       const chunkSizeBytes = Math.round(targetChunkDuration * this.chunkingConfig.bytesPerSecond);
       
-      // Ensure chunk size is reasonable
+      // Ensure chunk size is reasonable with latency optimization
       const minChunkSize = this.chunkingConfig.minChunkDuration * this.chunkingConfig.bytesPerSecond;
       const maxChunkSize = this.chunkingConfig.maxChunkDuration * this.chunkingConfig.bytesPerSecond;
       
       const finalChunkSize = Math.max(minChunkSize, Math.min(maxChunkSize, chunkSizeBytes));
       
-      logger.info('Calculated optimal chunk size', {
+      // ADAPTIVE CHUNKING: Adjust based on latency target
+      const estimatedLatency = (finalChunkSize / this.chunkingConfig.bytesPerSecond) * 1000;
+      if (estimatedLatency > this.chunkingConfig.maxLatencyTarget) {
+        // Reduce chunk size to meet latency target
+        const targetBytes = (this.chunkingConfig.maxLatencyTarget / 1000) * this.chunkingConfig.bytesPerSecond;
+        const adjustedChunkSize = Math.max(minChunkSize, Math.min(maxChunkSize, targetBytes));
+        
+        logger.info('Adjusted chunk size to meet latency target', {
+          originalSize: finalChunkSize,
+          adjustedSize: adjustedChunkSize,
+          estimatedLatency: estimatedLatency.toFixed(0) + 'ms',
+          targetLatency: this.chunkingConfig.maxLatencyTarget + 'ms'
+        });
+        
+        return adjustedChunkSize;
+      }
+      
+      logger.info('Calculated optimal chunk size for low latency', {
         totalDuration: totalDuration.toFixed(2) + 's',
         targetChunkDuration: targetChunkDuration.toFixed(2) + 's',
         chunkSizeBytes: finalChunkSize,
         chunkSizeKB: Math.round(finalChunkSize / 1024),
-        estimatedChunks: Math.ceil(audioBuffer.length / finalChunkSize)
+        estimatedChunks: Math.ceil(audioBuffer.length / finalChunkSize),
+        estimatedLatency: estimatedLatency.toFixed(0) + 'ms',
+        progressiveChunking: this.chunkingConfig.progressiveChunking
       });
       
       return finalChunkSize;
     } catch (error) {
       logger.error('Failed to calculate optimal chunk size', { error: error.message });
-      // Fallback to 2-second chunks
+      // Fallback to 1-second chunks for low latency
       return this.chunkingConfig.targetChunkDuration * this.chunkingConfig.bytesPerSecond;
     }
   }

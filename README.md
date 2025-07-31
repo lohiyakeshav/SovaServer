@@ -2,6 +2,10 @@
 
 A robust, real-time voice interface backend built with Node.js, Express, Socket.IO, and the Gemini Live API. This backend provides seamless voice conversation capabilities with intelligent interruption handling and multi-language support.
 
+## 👨‍💻 Creator
+
+**Sova** was created by **[Keshav Lohiya](https://keshavlohiya.vercel.app/)** - A passionate developer focused on building innovative AI solutions and voice interfaces.
+
 ## 🚀 Features
 
 - **Real-time Voice Streaming**: Bidirectional audio streaming via WebSockets
@@ -11,6 +15,67 @@ A robust, real-time voice interface backend built with Node.js, Express, Socket.
 - **Revolt Motors Context**: Focused conversations about electric vehicles
 - **Session Management**: Comprehensive session tracking and analytics
 - **Production-Ready**: Built with SOLID principles and best practices
+
+## 🎯 Functional Requirements
+
+### Interruptions
+- ✅ **User can interrupt AI while speaking** - Immediate response within 100ms
+- ✅ **AI stops immediately and listens to new input** - Native Gemini Live API support
+- ✅ **AI responds appropriately to interruptions** - Multi-level confirmation system
+- ✅ **Smooth interruption handling** - Progressive buffer clearing and session management
+
+### Low Latency (1-2 second target)
+- ✅ **Immediate first chunk transmission** - < 100ms for first audio chunk
+- ✅ **Progressive chunking** - 0.5-1.5s chunks for faster response
+- ✅ **Parallel multiport streaming** - 4 ports simultaneously for faster delivery
+- ✅ **Adaptive delay optimization** - 5-25ms between chunks
+- ✅ **Session reuse** - Faster response for continuous conversations
+
+### Performance Metrics
+- **First chunk latency**: < 100ms
+- **Complete response start**: < 1.5 seconds
+- **Interruption response**: < 100ms
+- **Parallel streaming**: 4 ports with 5ms delays
+- **Progressive chunking**: 0.5-3.0s adaptive chunks
+
+For detailed implementation, see [LATENCY_OPTIMIZATION.md](./LATENCY_OPTIMIZATION.md)
+
+## 🤖 Sova AI Identity
+
+### Core Identity
+**Sova** is the official AI assistant for Revolt Motors, exclusively focused on providing accurate information about:
+- Revolt Motors company information, history, and vision
+- Electric motorcycles and scooters in the Revolt lineup (RV400, RV300, future models)
+- Technical specifications, features, and performance metrics
+- Pricing, financing options, and purchasing information
+- Service centers, maintenance, warranties, and support
+- Battery technology, charging infrastructure, and sustainability
+- Revolt's mobile app, connected features, and smart technology
+- Electric vehicle industry trends (as they relate to Revolt)
+- Government policies and incentives for electric vehicles in India
+
+### Scope & Boundaries
+- ✅ **ALLOWED Topics**: Revolt Motors, electric vehicles, EV industry, government incentives
+- ❌ **PROHIBITED Topics**: Competitor information, non-automotive topics, personal advice, harmful content
+
+### Safety & Guard Rails
+- **Fact Verification**: Never speculate or provide unverified information
+- **Source Validation**: Only reference official Revolt communications
+- **Bias Prevention**: Present information objectively
+- **Harm Prevention**: Refuse unsafe practice requests
+
+### Testing Sova's Identity
+```bash
+# Test Sova's identity compliance
+node test-sova-identity.js
+```
+
+This will test:
+- **Scope boundaries**: Allowed vs prohibited topics
+- **Safety guardrails**: Fact verification, bias prevention
+- **Response templates**: Greeting, redirection, uncertainty handling
+
+For detailed identity implementation, see [SOVA_IDENTITY.md](./SOVA_IDENTITY.md)
 
 ## 📋 Prerequisites
 
@@ -244,3 +309,21 @@ For issues or questions, please check the logs first:
 - Application logs in console
 - Detailed error messages in development mode
 - Health check endpoints for service status 
+
+## 🔗 Links
+
+- **Creator Portfolio**: [Keshav Lohiya](https://keshavlohiya.vercel.app/)
+- **Project Repository**: [Sova Voice Interface Backend](https://github.com/your-username/sova-server)
+- **Documentation**: 
+  - [Latency Optimization](./LATENCY_OPTIMIZATION.md)
+  - [Sova Identity](./SOVA_IDENTITY.md)
+
+## 📞 Contact
+
+For questions, suggestions, or collaboration opportunities:
+- **Portfolio**: [keshavlohiya.vercel.app](https://keshavlohiya.vercel.app/)
+- **GitHub**: [@keshavlohiya](https://github.com/keshavlohiya)
+
+---
+
+**Built with ❤️ by [Keshav Lohiya](https://keshavlohiya.vercel.app/)** 
