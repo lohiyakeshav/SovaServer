@@ -18,7 +18,9 @@ class GeminiLiveService {
     this.currentAudioResponse = {
       chunks: [],
       isComplete: false,
-      startTime: null
+      startTime: null,
+      lastChunkTime: null,
+      timeoutDuration: 2000 // Increased timeout to 2 seconds
     };
     
     // Prevent multiple simultaneous audio responses
@@ -348,7 +350,10 @@ class GeminiLiveService {
           this.currentAudioResponse.startTime = Date.now();
         }
         
-        // Check if this response is complete (no more audio for 500ms)
+        // Update last chunk time
+        this.currentAudioResponse.lastChunkTime = Date.now();
+        
+        // Check if this response is complete (no more audio for timeout duration)
         this.scheduleResponseCompletion();
       }
 
@@ -611,10 +616,10 @@ class GeminiLiveService {
       clearTimeout(this.responseCompletionTimeout);
     }
     
-    // Set timeout to complete response after 500ms of no new chunks
+    // Set timeout to complete response after timeout duration of no new chunks
     this.responseCompletionTimeout = setTimeout(() => {
       this.completeAudioResponse();
-    }, 500);
+    }, this.currentAudioResponse.timeoutDuration);
   }
   
   // Complete the current audio response
@@ -642,37 +647,54 @@ class GeminiLiveService {
       queueLength: this.audioResponseQueue.length
     });
     
-    // Combine all chunks into one complete response
-    const completeAudio = this.combineAudioChunks(this.currentAudioResponse.chunks);
-    
-    // Add to audio queue for streaming
-    this.audioQueue.push(completeAudio);
-    
-    // Update conversation turn with response length
-    if (this.conversationState.isActive && this.conversationState.conversationHistory.length > 0) {
-      const lastTurn = this.conversationState.conversationHistory[this.conversationState.conversationHistory.length - 1];
-      lastTurn.responseLength = completeAudio.length;
-    }
-    
-    // Emit the complete audio response
-    if (this.onAudioChunk) {
-      await this.onAudioChunk(completeAudio);
-    }
-    
-    // Reset for next response
-    this.clearCurrentAudioResponse();
-    
-    // Process next queued response if any
-    this.isProcessingAudioResponse = false;
-    if (this.audioResponseQueue.length > 0) {
-      const nextResponse = this.audioResponseQueue.shift();
-      this.currentAudioResponse = {
-        chunks: nextResponse.chunks,
-        isComplete: false,
-        startTime: nextResponse.startTime
-      };
-      // Process the next response immediately
-      setTimeout(() => this.completeAudioResponse(), 100);
+    try {
+      // Combine all chunks into one complete response
+      const completeAudio = this.combineAudioChunks(this.currentAudioResponse.chunks);
+      
+      if (!completeAudio) {
+        logger.warn('No complete audio generated from chunks');
+        this.isProcessingAudioResponse = false;
+        this.clearCurrentAudioResponse();
+        return;
+      }
+      
+      // Add to audio queue for streaming
+      this.audioQueue.push(completeAudio);
+      
+      // Update conversation turn with response length
+      if (this.conversationState.isActive && this.conversationState.conversationHistory.length > 0) {
+        const lastTurn = this.conversationState.conversationHistory[this.conversationState.conversationHistory.length - 1];
+        lastTurn.responseLength = completeAudio.length;
+      }
+      
+      // Emit the complete audio response
+      if (this.onAudioChunk) {
+        await this.onAudioChunk(completeAudio);
+      }
+      
+      logger.info('Audio response completed successfully', {
+        responseSize: completeAudio.length,
+        chunksProcessed: this.currentAudioResponse.chunks.length
+      });
+      
+    } catch (error) {
+      logger.error('Failed to complete audio response', { error: error.message });
+    } finally {
+      // Reset for next response
+      this.clearCurrentAudioResponse();
+      
+      // Process next queued response if any
+      this.isProcessingAudioResponse = false;
+      if (this.audioResponseQueue.length > 0) {
+        const nextResponse = this.audioResponseQueue.shift();
+        this.currentAudioResponse = {
+          chunks: nextResponse.chunks,
+          isComplete: false,
+          startTime: nextResponse.startTime
+        };
+        // Process the next response immediately
+        setTimeout(() => this.completeAudioResponse(), 100);
+      }
     }
   }
   
@@ -681,7 +703,9 @@ class GeminiLiveService {
     this.currentAudioResponse = {
       chunks: [],
       isComplete: false,
-      startTime: null
+      startTime: null,
+      lastChunkTime: null,
+      timeoutDuration: 2000
     };
     
     if (this.responseCompletionTimeout) {

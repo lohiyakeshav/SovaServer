@@ -90,6 +90,11 @@ class VoiceHandlerLive {
     socket.on('text-input', async (data) => {
       await this.handleTextInput(socket, data);
     });
+
+    // Handle session reset for continuous conversation
+    socket.on('reset-session', async (data) => {
+      await this.handleSessionReset(socket, data?.sessionId);
+    });
   }
 
   // Handle start conversation event
@@ -172,8 +177,15 @@ class VoiceHandlerLive {
       // Update session status
       session.updateStatus('active');
 
-      // Start conversation management
-      this.geminiLiveService.startConversation(session.id, data?.voiceName);
+      // Start conversation management - only if not already active
+      if (!this.geminiLiveService.conversationState.isActive) {
+        this.geminiLiveService.startConversation(session.id, data?.voiceName);
+      } else {
+        logger.info('Conversation already active, continuing existing conversation', {
+          sessionId: session.id,
+          conversationActive: this.geminiLiveService.conversationState.isActive
+        });
+      }
 
       // Send session info to client
       socket.emit('session-status', {
@@ -398,41 +410,8 @@ class VoiceHandlerLive {
         if (this.multiportConfig.enabled) {
           await this.streamChunksMultiport(socket, sessionId, chunks);
         } else {
-          // Fallback to sequential transmission
-          logger.info('Starting sequential chunk streaming', {
-            sessionId,
-            totalChunks: chunks.length,
-            chunkSize: optimalChunkSize
-          });
-          
-          for (let i = 0; i < chunks.length; i++) {
-            const chunk = chunks[i];
-            const isLastChunk = i === chunks.length - 1;
-            
-            socket.emit('audio-chunk', {
-              sessionId,
-              chunkIndex: i,
-              totalChunks: chunks.length,
-              isLastChunk,
-              audioData: chunk,
-              progress: Math.round(((i + 1) / chunks.length) * 100) + '%'
-            });
-
-            logger.debug('Chunk transmitted', {
-              sessionId,
-              chunkIndex: i,
-              totalChunks: chunks.length,
-              isLastChunk
-            });
-
-            // Ensure sequential transmission with optimized delay
-            await new Promise(resolve => setTimeout(resolve, this.chunkingConfig.sequentialDelay));
-          }
-          
-          logger.info('Sequential chunk streaming completed', {
-            sessionId,
-            totalChunks: chunks.length
-          });
+          // Use improved sequential transmission
+          await this.streamChunksSequential(socket, sessionId, chunks);
         }
 
         // Send completion signal
@@ -589,10 +568,24 @@ class VoiceHandlerLive {
       
       // Fallback to sequential transmission on error
       logger.info('Falling back to sequential transmission', { sessionId });
+      await this.streamChunksSequential(socket, sessionId, chunks);
+    }
+  }
+
+  // Stream chunks sequentially with improved reliability
+  async streamChunksSequential(socket, sessionId, chunks) {
+    try {
+      logger.info('Starting sequential chunk streaming', {
+        sessionId,
+        totalChunks: chunks.length,
+        chunkSize: chunks[0]?.length || 0
+      });
+      
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
         const isLastChunk = i === chunks.length - 1;
         
+        // Emit chunk with improved error handling
         socket.emit('audio-chunk', {
           sessionId,
           chunkIndex: i,
@@ -601,9 +594,31 @@ class VoiceHandlerLive {
           audioData: chunk,
           progress: Math.round(((i + 1) / chunks.length) * 100) + '%'
         });
-        
-        await new Promise(resolve => setTimeout(resolve, 100));
+
+        logger.debug('Sequential chunk transmitted', {
+          sessionId,
+          chunkIndex: i,
+          totalChunks: chunks.length,
+          isLastChunk,
+          chunkSize: chunk.length
+        });
+
+        // Ensure sequential transmission with optimized delay
+        if (!isLastChunk) {
+          await new Promise(resolve => setTimeout(resolve, this.chunkingConfig.sequentialDelay));
+        }
       }
+      
+      logger.info('Sequential chunk streaming completed', {
+        sessionId,
+        totalChunks: chunks.length
+      });
+      
+    } catch (error) {
+      logger.error('Failed to stream chunks sequentially', { 
+        sessionId, 
+        error: error.message 
+      });
     }
   }
 
@@ -622,14 +637,21 @@ class VoiceHandlerLive {
       const { transcription } = data;
       
       if (transcription && transcription.trim().length > 0) {
-        // Handle text transcription
+        // Handle text transcription - treat as a new, separate query
         logger.info('Processing text transcription', {
           sessionId: session.id,
           transcription: transcription.substring(0, 100) + (transcription.length > 100 ? '...' : ''),
           transcriptionLength: transcription.length
         });
 
-        // Send text to Gemini Live
+        // Clear any previous audio processing state
+        const sessionInfo = this.activeSessions.get(session.id);
+        if (sessionInfo) {
+          sessionInfo.isProcessing = false;
+          sessionInfo.audioQueue = [];
+        }
+
+        // Send text to Gemini Live as a fresh query
         await this.geminiLiveService.sendTextInput(transcription, session.id);
         
         logger.info('Text transcription sent to Gemini Live successfully', { sessionId: session.id });
@@ -701,6 +723,40 @@ class VoiceHandlerLive {
         sessionId: session?.id,
         socketId: socket.id,
         error: error.message
+      });
+    }
+  }
+
+  // Handle session reset for continuous conversation
+  async handleSessionReset(socket, sessionId) {
+    try {
+      const sessionInfo = this.activeSessions.get(sessionId);
+      if (!sessionInfo) {
+        logger.warn('Session info not found for reset', { sessionId });
+        return;
+      }
+
+      logger.info('Handling session reset for continuous conversation', { sessionId });
+
+      // Clear processing state but keep session active
+      sessionInfo.isProcessing = false;
+      sessionInfo.audioQueue = [];
+
+      // Don't restart conversation if it's already active
+      if (this.geminiLiveService.conversationState.isActive) {
+        logger.info('Conversation already active, skipping restart', { sessionId });
+        return;
+      }
+
+      // Only restart conversation if it's not active
+      this.geminiLiveService.startConversation(sessionId);
+
+      logger.info('Session reset completed successfully', { sessionId });
+
+    } catch (error) {
+      logger.error('Failed to handle session reset', { 
+        sessionId, 
+        error: error.message 
       });
     }
   }
