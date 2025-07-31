@@ -14,6 +14,40 @@ class GeminiLiveService {
     this.currentApiKeyIndex = 0;
     this.apiKeys = this.getApiKeys();
     
+    // Audio response buffering - collect multiple chunks into one complete response
+    this.currentAudioResponse = {
+      chunks: [],
+      isComplete: false,
+      startTime: null
+    };
+    
+    // Prevent multiple simultaneous audio responses
+    this.isProcessingAudioResponse = false;
+    this.audioResponseQueue = [];
+    
+    // Continuous conversation management
+    this.conversationState = {
+      isActive: false,
+      startTime: null,
+      turnCount: 0,
+      lastActivity: null,
+      conversationHistory: [],
+      sessionId: null,
+      voiceName: null,
+      speechRate: 0.8,
+      isInterrupted: false
+    };
+    
+    // Session persistence and recovery
+    this.sessionManager = {
+      maxSessionDuration: 30 * 60 * 1000, // 30 minutes
+      sessionRefreshInterval: 5 * 60 * 1000, // 5 minutes
+      autoReconnect: true,
+      reconnectAttempts: 0,
+      maxReconnectAttempts: 3,
+      lastReconnectTime: 0
+    };
+    
     // Quota management
     this.quotaManager = {
       requestsPerMinute: 10, // Limit requests per minute per key
@@ -220,13 +254,14 @@ class GeminiLiveService {
     try {
       const model = 'gemini-2.0-flash-live-001';
       const voice = voiceName || config.tts?.voice || 'Orus';
-      const speechRate = this.speechRate || 0.5; // Default to very slow speech (50% speed)
+      const speechRate = this.conversationState.speechRate || 0.8; // Use conversation state speech rate
 
       this.session = await this.client.live.connect({
         model: model,
         callbacks: {
           onopen: () => {
             this.isConnected = true;
+            this.sessionManager.reconnectAttempts = 0;
             logger.info('Gemini Live session opened successfully');
           },
           onmessage: async (message) => {
@@ -235,6 +270,11 @@ class GeminiLiveService {
           onerror: (error) => {
             logger.error('Gemini Live session error', { error: error.message });
             this.isConnected = false;
+            
+            // Attempt auto-reconnection for continuous conversations
+            if (this.sessionManager.autoReconnect && this.conversationState.isActive) {
+              this.attemptReconnection();
+            }
           },
           onclose: (event) => {
             logger.info('Gemini Live session closed', { reason: event.reason });
@@ -244,6 +284,9 @@ class GeminiLiveService {
             if (event.reason && event.reason.includes('quota')) {
               logger.warn('Quota exceeded, attempting to switch to next API key');
               this.handleQuotaError();
+            } else if (this.sessionManager.autoReconnect && this.conversationState.isActive) {
+              // Attempt reconnection for continuous conversations
+              this.attemptReconnection();
             }
           },
         },
@@ -257,18 +300,23 @@ class GeminiLiveService {
             },
             languageCode: 'en-US',
             // Enhanced audio quality settings
-            audioEncoding: 'LINEAR16',
-            sampleRateHertz: 44100, // CD quality sample rate for better audio
+            audioEncoding: 'LINEAR16', // Gemini Live actually returns LINEAR16 PCM
+            sampleRateHertz: 48000, // Set to 48kHz for consistent sample rate
             effectsProfileId: ['headphone-class-device'], // Optimize for headphones
-            // Speech rate control for slower, clearer speech
-            speakingRate: 0.5 // Very slow speech rate (50% speed) for maximum clarity
+            // Speech rate control for natural conversation
+            speakingRate: speechRate // Use conversation state speech rate
           },
         },
       });
 
+      // Update conversation state with voice name
+      this.conversationState.voiceName = voice;
+
       logger.info('Gemini Live session initialized', { 
         model: model,
-        voice: voice
+        voice: voice,
+        speechRate: speechRate,
+        conversationActive: this.conversationState.isActive
       });
     } catch (error) {
       logger.error('Failed to initialize Gemini Live session', { error: error.message });
@@ -282,28 +330,33 @@ class GeminiLiveService {
       const audio = message.serverContent?.modelTurn?.parts[0]?.inlineData;
 
       if (audio) {
-        logger.info('Received audio response from Gemini Live', {
+        logger.info('Received audio chunk from Gemini Live', {
           dataSize: audio.data.length,
-          format: 'base64'
+          format: 'base64',
+          chunksCollected: this.currentAudioResponse.chunks.length,
+          isProcessing: this.isProcessingAudioResponse
         });
 
         // Process the audio data
         const processedAudio = await this.processAudioResponse(audio.data);
         
-        // Add to audio queue for streaming
-        this.audioQueue.push(processedAudio);
+        // Add to current response buffer
+        this.currentAudioResponse.chunks.push(processedAudio);
         
-        // Emit audio chunk event if we have a callback
-        if (this.onAudioChunk) {
-          this.onAudioChunk(processedAudio);
+        // Start timing if this is the first chunk
+        if (!this.currentAudioResponse.startTime) {
+          this.currentAudioResponse.startTime = Date.now();
         }
+        
+        // Check if this response is complete (no more audio for 500ms)
+        this.scheduleResponseCompletion();
       }
 
       // Handle interruptions
       const interrupted = message.serverContent?.interrupted;
       if (interrupted) {
         logger.info('Audio response interrupted by user');
-        this.clearAudioQueue();
+        this.clearAllAudioResponses();
         
         if (this.onInterruption) {
           this.onInterruption();
@@ -334,118 +387,24 @@ class GeminiLiveService {
   // Process audio response data
   async processAudioResponse(audioData) {
     try {
-      // The audio data comes as base64 encoded
+      // The audio data comes as base64 encoded LINEAR16 PCM
       const decodedAudio = Buffer.from(audioData, 'base64');
       
-      // Check if it's already a WAV file
-      const isWAV = this.isWAVFile(decodedAudio);
+      logger.info('Received LINEAR16 PCM audio, converting to WAV format', {
+        dataSize: decodedAudio.length
+      });
       
-      if (isWAV) {
-        logger.info('Audio is already in WAV format, using as-is');
-        // Log WAV file details for debugging
-        const sampleRate = this.getWAVSampleRate(decodedAudio);
-        const channels = this.getWAVChannels(decodedAudio);
-        const bitsPerSample = this.getWAVBitsPerSample(decodedAudio);
-        
-        logger.info('WAV file details', {
-          sampleRate,
-          channels,
-          bitsPerSample,
-          dataSize: decodedAudio.length
-        });
-        
-        // Return the original base64 data without modification
-        return audioData;
-      } else {
-        // The Live API should provide high-quality audio directly
-        // If it's not WAV, it might be raw PCM or another format
-        logger.info('Processing raw audio data from Live API');
-        
-        // Try to detect the format and handle appropriately
-        const processedAudio = await this.processRawAudio(decodedAudio);
-        return processedAudio;
-      }
+      // Convert raw LINEAR16 PCM to WAV format at 48kHz
+      const sampleRate = 48000; // 48kHz as configured
+      const channels = 1; // Mono
+      const bitsPerSample = 16; // 16-bit PCM
+      
+      const wavData = this.createWAVFile(decodedAudio, sampleRate, channels, bitsPerSample);
+      return Buffer.from(wavData).toString('base64');
     } catch (error) {
       logger.error('Failed to process audio response', { error: error.message });
       // Return a fallback beep
       return this.generateFallbackAudio();
-    }
-  }
-
-  // Check if audio data is WAV format
-  isWAVFile(audioData) {
-    if (audioData.length < 12) return false;
-    
-    // Check for RIFF header
-    const riffHeader = audioData.slice(0, 4).toString();
-    const waveHeader = audioData.slice(8, 12).toString();
-    
-    return riffHeader === 'RIFF' && waveHeader === 'WAVE';
-  }
-
-  // Get WAV sample rate
-  getWAVSampleRate(audioData) {
-    if (!this.isWAVFile(audioData)) return null;
-    return audioData.readUInt32LE(24);
-  }
-
-  // Get WAV channels
-  getWAVChannels(audioData) {
-    if (!this.isWAVFile(audioData)) return null;
-    return audioData.readUInt16LE(22);
-  }
-
-  // Get WAV bits per sample
-  getWAVBitsPerSample(audioData) {
-    if (!this.isWAVFile(audioData)) return null;
-    return audioData.readUInt16LE(34);
-  }
-
-  // Process raw audio data from Live API
-  async processRawAudio(audioData) {
-    try {
-      // The Live API might send raw PCM data
-      // Use CD quality settings for better audio
-      const sampleRate = 44100; // 44.1kHz CD quality
-      const channels = 1; // Mono
-      const bitsPerSample = 16; // 16-bit PCM
-      
-      logger.info('Processing raw audio with CD quality settings', {
-        sampleRate,
-        channels,
-        bitsPerSample,
-        inputSize: audioData.length
-      });
-      
-      // Create WAV file with CD quality settings
-      const wavData = this.createWAVFile(audioData, sampleRate, channels, bitsPerSample);
-      return Buffer.from(wavData).toString('base64');
-    } catch (error) {
-      logger.error('Failed to process raw audio', { error: error.message });
-      throw error;
-    }
-  }
-
-  // Convert audio data to WAV format (legacy method)
-  async convertToWAV(audioData) {
-    try {
-      // Use CD quality parameters
-      const sampleRate = 44100; // 44.1kHz CD quality
-      const channels = 1; // Mono
-      const bitsPerSample = 16; // 16-bit PCM
-      
-      logger.info('Converting audio to WAV with CD quality parameters', {
-        sampleRate,
-        channels,
-        bitsPerSample,
-        inputSize: audioData.length
-      });
-      
-      const wavData = this.createWAVFile(audioData, sampleRate, channels, bitsPerSample);
-      return wavData;
-    } catch (error) {
-      logger.error('Failed to convert audio to WAV', { error: error.message });
-      throw error;
     }
   }
 
@@ -565,6 +524,12 @@ class GeminiLiveService {
         text: text.substring(0, 100) + (text.length > 100 ? '...' : '')
       });
 
+      // Clear any pending audio response before sending new input
+      this.clearAllAudioResponses();
+
+      // Record conversation turn
+      this.recordTurn('text', text.length);
+
       // Send text input to the Live session
       await this.session.sendRealtimeInput({
         text: text
@@ -573,7 +538,10 @@ class GeminiLiveService {
       // Increment quota usage after successful request
       this.incrementQuota();
 
-      logger.info('Text input sent successfully to Gemini Live', { sessionId });
+      logger.info('Text input sent successfully to Gemini Live', { 
+        sessionId,
+        turnCount: this.conversationState.turnCount
+      });
 
     } catch (error) {
       logger.error('Failed to send text input to Gemini Live', {
@@ -611,12 +579,21 @@ class GeminiLiveService {
         dataSize: audioData.length
       });
 
+      // Clear any pending audio response before sending new input
+      this.clearAllAudioResponses();
+
+      // Record conversation turn
+      this.recordTurn('audio', audioData.length);
+
       // Send audio input to the Live session
       await this.session.sendRealtimeInput({
         media: audioData // This should be a Blob or ArrayBuffer
       });
 
-      logger.info('Audio input sent successfully to Gemini Live', { sessionId });
+      logger.info('Audio input sent successfully to Gemini Live', { 
+        sessionId,
+        turnCount: this.conversationState.turnCount
+      });
 
     } catch (error) {
       logger.error('Failed to send audio input to Gemini Live', {
@@ -624,6 +601,370 @@ class GeminiLiveService {
         error: error.message
       });
       throw error;
+    }
+  }
+
+  // Schedule response completion check
+  scheduleResponseCompletion() {
+    // Clear any existing timeout
+    if (this.responseCompletionTimeout) {
+      clearTimeout(this.responseCompletionTimeout);
+    }
+    
+    // Set timeout to complete response after 500ms of no new chunks
+    this.responseCompletionTimeout = setTimeout(() => {
+      this.completeAudioResponse();
+    }, 500);
+  }
+  
+  // Complete the current audio response
+  async completeAudioResponse() {
+    if (this.currentAudioResponse.chunks.length === 0) {
+      return;
+    }
+    
+    // Prevent multiple simultaneous audio responses
+    if (this.isProcessingAudioResponse) {
+      logger.info('Audio response already being processed, queuing this response');
+      this.audioResponseQueue.push({
+        chunks: [...this.currentAudioResponse.chunks],
+        startTime: this.currentAudioResponse.startTime
+      });
+      this.clearCurrentAudioResponse();
+      return;
+    }
+    
+    this.isProcessingAudioResponse = true;
+    
+    logger.info('Completing audio response', {
+      totalChunks: this.currentAudioResponse.chunks.length,
+      duration: Date.now() - this.currentAudioResponse.startTime,
+      queueLength: this.audioResponseQueue.length
+    });
+    
+    // Combine all chunks into one complete response
+    const completeAudio = this.combineAudioChunks(this.currentAudioResponse.chunks);
+    
+    // Add to audio queue for streaming
+    this.audioQueue.push(completeAudio);
+    
+    // Update conversation turn with response length
+    if (this.conversationState.isActive && this.conversationState.conversationHistory.length > 0) {
+      const lastTurn = this.conversationState.conversationHistory[this.conversationState.conversationHistory.length - 1];
+      lastTurn.responseLength = completeAudio.length;
+    }
+    
+    // Emit the complete audio response
+    if (this.onAudioChunk) {
+      await this.onAudioChunk(completeAudio);
+    }
+    
+    // Reset for next response
+    this.clearCurrentAudioResponse();
+    
+    // Process next queued response if any
+    this.isProcessingAudioResponse = false;
+    if (this.audioResponseQueue.length > 0) {
+      const nextResponse = this.audioResponseQueue.shift();
+      this.currentAudioResponse = {
+        chunks: nextResponse.chunks,
+        isComplete: false,
+        startTime: nextResponse.startTime
+      };
+      // Process the next response immediately
+      setTimeout(() => this.completeAudioResponse(), 100);
+    }
+  }
+  
+  // Clear current audio response buffer
+  clearCurrentAudioResponse() {
+    this.currentAudioResponse = {
+      chunks: [],
+      isComplete: false,
+      startTime: null
+    };
+    
+    if (this.responseCompletionTimeout) {
+      clearTimeout(this.responseCompletionTimeout);
+      this.responseCompletionTimeout = null;
+    }
+    
+    logger.info('Current audio response cleared');
+  }
+  
+  // Clear all audio responses (for interruptions)
+  clearAllAudioResponses() {
+    this.clearCurrentAudioResponse();
+    this.audioResponseQueue = [];
+    this.isProcessingAudioResponse = false;
+    logger.info('All audio responses cleared');
+  }
+  
+  // Start a new conversation
+  startConversation(sessionId, voiceName = null) {
+    this.conversationState = {
+      isActive: true,
+      startTime: Date.now(),
+      turnCount: 0,
+      lastActivity: Date.now(),
+      conversationHistory: [],
+      sessionId,
+      voiceName: voiceName || this.conversationState.voiceName,
+      speechRate: this.conversationState.speechRate,
+      isInterrupted: false
+    };
+    
+    logger.info('Conversation started', {
+      sessionId,
+      voiceName: this.conversationState.voiceName,
+      startTime: new Date(this.conversationState.startTime).toISOString()
+    });
+  }
+  
+  // End the current conversation
+  endConversation() {
+    const duration = Date.now() - this.conversationState.startTime;
+    const turnCount = this.conversationState.turnCount;
+    
+    logger.info('Conversation ended', {
+      sessionId: this.conversationState.sessionId,
+      duration: Math.round(duration / 1000) + 's',
+      turnCount,
+      voiceName: this.conversationState.voiceName
+    });
+    
+    this.conversationState = {
+      isActive: false,
+      startTime: null,
+      turnCount: 0,
+      lastActivity: null,
+      conversationHistory: [],
+      sessionId: null,
+      voiceName: this.conversationState.voiceName,
+      speechRate: this.conversationState.speechRate,
+      isInterrupted: false
+    };
+  }
+  
+  // Record a conversation turn
+  recordTurn(inputType, inputLength, responseLength = 0) {
+    if (!this.conversationState.isActive) {
+      logger.warn('Attempted to record turn in inactive conversation');
+      return;
+    }
+    
+    this.conversationState.turnCount++;
+    this.conversationState.lastActivity = Date.now();
+    
+    this.conversationState.conversationHistory.push({
+      turn: this.conversationState.turnCount,
+      timestamp: Date.now(),
+      inputType, // 'text' or 'audio'
+      inputLength,
+      responseLength,
+      duration: Date.now() - this.conversationState.startTime
+    });
+    
+    logger.info('Conversation turn recorded', {
+      turn: this.conversationState.turnCount,
+      inputType,
+      inputLength,
+      responseLength,
+      sessionId: this.conversationState.sessionId
+    });
+  }
+  
+  // Check if conversation is still active
+  isConversationActive() {
+    if (!this.conversationState.isActive) return false;
+    
+    const timeSinceLastActivity = Date.now() - this.conversationState.lastActivity;
+    const maxInactivity = 10 * 60 * 1000; // 10 minutes
+    
+    if (timeSinceLastActivity > maxInactivity) {
+      logger.info('Conversation timed out due to inactivity', {
+        sessionId: this.conversationState.sessionId,
+        timeSinceLastActivity: Math.round(timeSinceLastActivity / 1000) + 's'
+      });
+      this.endConversation();
+      return false;
+    }
+    
+    return true;
+  }
+  
+  // Get conversation statistics
+  getConversationStats() {
+    if (!this.conversationState.isActive) {
+      return { isActive: false };
+    }
+    
+    const duration = Date.now() - this.conversationState.startTime;
+    const avgTurnTime = this.conversationState.turnCount > 0 
+      ? duration / this.conversationState.turnCount 
+      : 0;
+    
+    return {
+      isActive: true,
+      sessionId: this.conversationState.sessionId,
+      duration: Math.round(duration / 1000),
+      turnCount: this.conversationState.turnCount,
+      avgTurnTime: Math.round(avgTurnTime / 1000),
+      voiceName: this.conversationState.voiceName,
+      speechRate: this.conversationState.speechRate,
+      lastActivity: new Date(this.conversationState.lastActivity).toISOString()
+    };
+  }
+  
+  // Start session monitoring for continuous conversations
+  startSessionMonitoring() {
+    if (this.sessionMonitorInterval) {
+      clearInterval(this.sessionMonitorInterval);
+    }
+    
+    this.sessionMonitorInterval = setInterval(() => {
+      this.monitorSession();
+    }, 30000); // Check every 30 seconds
+    
+    logger.info('Session monitoring started for continuous conversations');
+  }
+  
+  // Monitor session health and conversation state
+  monitorSession() {
+    // Check conversation activity
+    if (this.conversationState.isActive && !this.isConversationActive()) {
+      logger.info('Conversation timed out, ending session');
+      this.endConversation();
+      return;
+    }
+    
+    // Check session duration
+    if (this.session && this.isConnected) {
+      const sessionDuration = Date.now() - this.quotaManager.lastSessionTime;
+      if (sessionDuration > this.sessionManager.maxSessionDuration) {
+        logger.info('Session duration exceeded, refreshing session');
+        this.refreshSession();
+      }
+    }
+    
+    // Log session health
+    logger.info('Session health check', {
+      isConnected: this.isConnected,
+      conversationActive: this.conversationState.isActive,
+      sessionDuration: this.session ? Math.round((Date.now() - this.quotaManager.lastSessionTime) / 1000) : 0,
+      reconnectAttempts: this.sessionManager.reconnectAttempts
+    });
+  }
+  
+  // Attempt to reconnect for continuous conversations
+  async attemptReconnection() {
+    const now = Date.now();
+    const timeSinceLastReconnect = now - this.sessionManager.lastReconnectTime;
+    const minReconnectInterval = 5000; // 5 seconds
+    
+    if (this.sessionManager.reconnectAttempts >= this.sessionManager.maxReconnectAttempts) {
+      logger.error('Max reconnection attempts reached', {
+        attempts: this.sessionManager.reconnectAttempts,
+        sessionId: this.conversationState.sessionId
+      });
+      this.endConversation();
+      return;
+    }
+    
+    if (timeSinceLastReconnect < minReconnectInterval) {
+      logger.info('Reconnection attempt too soon, waiting', {
+        timeSinceLastReconnect: Math.round(timeSinceLastReconnect / 1000) + 's'
+      });
+      return;
+    }
+    
+    this.sessionManager.reconnectAttempts++;
+    this.sessionManager.lastReconnectTime = now;
+    
+    logger.info('Attempting to reconnect for continuous conversation', {
+      attempt: this.sessionManager.reconnectAttempts,
+      sessionId: this.conversationState.sessionId
+    });
+    
+    try {
+      await this.reconnect();
+      logger.info('Reconnection successful');
+    } catch (error) {
+      logger.error('Reconnection failed', { error: error.message });
+      
+      // Schedule next attempt
+      setTimeout(() => {
+        if (this.conversationState.isActive) {
+          this.attemptReconnection();
+        }
+      }, 10000); // Wait 10 seconds before next attempt
+    }
+  }
+  
+  // Refresh session for long conversations
+  async refreshSession() {
+    if (!this.conversationState.isActive) {
+      logger.info('No active conversation, skipping session refresh');
+      return;
+    }
+    
+    logger.info('Refreshing session for continuous conversation', {
+      sessionId: this.conversationState.sessionId,
+      turnCount: this.conversationState.turnCount
+    });
+    
+    try {
+      // Close current session
+      if (this.session) {
+        await this.session.close();
+      }
+      
+      // Initialize new session with same voice
+      await this.initSession(this.conversationState.voiceName);
+      
+      logger.info('Session refreshed successfully');
+    } catch (error) {
+      logger.error('Failed to refresh session', { error: error.message });
+      this.endConversation();
+    }
+  }
+  
+  // Combine multiple audio chunks into one
+  combineAudioChunks(chunks) {
+    if (chunks.length === 0) return null;
+    if (chunks.length === 1) return chunks[0];
+    
+    // For WAV files, we need to combine the data sections while preserving the header
+    const firstChunk = Buffer.from(chunks[0], 'base64');
+    const isWAV = firstChunk.length >= 12 && 
+                 firstChunk.slice(0, 4).toString() === 'RIFF' &&
+                 firstChunk.slice(8, 12).toString() === 'WAVE';
+    
+    if (isWAV) {
+      // For WAV files, combine the data sections while preserving the header
+      const header = firstChunk.slice(0, 44); // WAV header
+      const dataChunks = chunks.map(chunk => {
+        const buffer = Buffer.from(chunk, 'base64');
+        return buffer.slice(44); // Skip header for all chunks except first
+      });
+      
+      const combinedData = Buffer.concat(dataChunks);
+      const totalSize = 36 + combinedData.length; // 36 + data size
+      
+      // Update WAV header with new size
+      const newHeader = Buffer.alloc(44);
+      header.copy(newHeader, 0, 0, 4); // RIFF
+      newHeader.writeUInt32LE(totalSize, 4); // File size
+      header.copy(newHeader, 8, 8, 44); // Rest of header
+      newHeader.writeUInt32LE(combinedData.length, 40); // Update data chunk size
+      
+      const combinedWAV = Buffer.concat([newHeader, combinedData]);
+      return combinedWAV.toString('base64');
+    } else {
+      // For raw audio, just concatenate
+      const buffers = chunks.map(chunk => Buffer.from(chunk, 'base64'));
+      const combined = Buffer.concat(buffers);
+      return combined.toString('base64');
     }
   }
 
@@ -646,11 +987,22 @@ class GeminiLiveService {
   // Close the Live session
   async closeSession() {
     try {
+      // End conversation if active
+      if (this.conversationState.isActive) {
+        this.endConversation();
+      }
+      
+      // Stop session monitoring
+      if (this.sessionMonitorInterval) {
+        clearInterval(this.sessionMonitorInterval);
+        this.sessionMonitorInterval = null;
+      }
+      
       if (this.session) {
         await this.session.close();
         this.session = null;
         this.isConnected = false;
-        logger.info('Gemini Live session closed');
+        logger.info('Gemini Live session closed successfully');
       }
     } catch (error) {
       logger.error('Failed to close Gemini Live session', { error: error.message });
@@ -853,6 +1205,15 @@ Remember: Always respond naturally and helpfully. If someone asks you to say som
       audioQueueLength: this.audioQueue.length,
       isProcessing: this.isProcessing,
       serviceType: 'Gemini Live API',
+      conversation: this.getConversationStats(),
+      session: {
+        isConnected: this.isConnected,
+        reconnectAttempts: this.sessionManager.reconnectAttempts,
+        maxReconnectAttempts: this.sessionManager.maxReconnectAttempts,
+        autoReconnect: this.sessionManager.autoReconnect,
+        sessionDuration: this.session ? Math.round((Date.now() - this.quotaManager.lastSessionTime) / 1000) : 0,
+        maxSessionDuration: Math.round(this.sessionManager.maxSessionDuration / 1000)
+      },
       quota: {
         currentKey: currentKey + 1,
         totalKeys: this.apiKeys.length,

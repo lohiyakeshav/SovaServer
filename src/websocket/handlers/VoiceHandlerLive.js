@@ -7,8 +7,21 @@ class VoiceHandlerLive {
   constructor() {
     this.geminiLiveService = new GeminiLiveService();
     this.activeSessions = new Map(); // sessionId -> session info
-    this.audioBuffers = new Map(); // Buffer audio chunks for longer segments
-    this.bufferThreshold = 1.5; // Buffer until we have 1.5 seconds of audio (much longer segments)
+    // Removed complex buffering - Gemini Live sends complete responses
+    
+    // Multiport chunking configuration
+    this.multiportConfig = {
+      enabled: true, // ENABLE EFFICIENT MULTIPORT
+      maxPorts: 3, // Match frontend ports (0,1,2)
+      chunkDistribution: 'round-robin', // Distribute chunks across ports
+      portBase: 3000, // Base port for multiport connections
+      chunkDelay: 10, // Fast parallel transmission
+      maxConcurrentChunks: 12 // Allow more concurrent chunks
+    };
+    
+    // Track multiport connections
+    this.multiportConnections = new Map(); // sessionId -> { ports: [], currentPort: 0 }
+    
     this.setupCallbacks();
   }
 
@@ -68,8 +81,66 @@ class VoiceHandlerLive {
       // Safely get userId from multiple sources
       const userId = data?.userId || socket.handshake?.auth?.userId || socket.userId || 'guest-user';
 
-      // Create new session
-      const session = sessionManager.createSession(socket.id, userId);
+      // Check if session already exists for this socket
+      let session = sessionManager.getSessionBySocketId(socket.id);
+      if (session) {
+        logger.info('Session already exists, reusing existing session', {
+          sessionId: session.id,
+          socketId: socket.id,
+          userId: userId
+        });
+        
+        // Update existing session status
+        session.updateStatus('active');
+        
+        // Ensure session is in activeSessions
+        if (!this.activeSessions.has(session.id)) {
+          this.activeSessions.set(session.id, {
+            session,
+            socket,
+            isProcessing: false,
+            audioQueue: []
+          });
+          logger.info('Added existing session to activeSessions', { sessionId: session.id });
+        }
+        
+        // Send session info to client
+        socket.emit('session-status', {
+          sessionId: session.id,
+          status: 'active',
+          message: 'Reusing existing voice chat session',
+          multiportEnabled: this.multiportConfig.enabled,
+          portCount: this.multiportConfig.maxPorts,
+          basePort: this.multiportConfig.portBase
+        });
+        return;
+      }
+      
+      // Also check if we have an active session for this user
+      const existingSession = Array.from(this.activeSessions.values())
+        .find(sessionInfo => sessionInfo.socket.id === socket.id);
+      
+      if (existingSession) {
+        logger.info('Active session found for socket, reusing', {
+          sessionId: existingSession.session.id,
+          socketId: socket.id,
+          userId: userId
+        });
+        
+        // Send session info to client
+        socket.emit('session-status', {
+          sessionId: existingSession.session.id,
+          status: 'active',
+          message: 'Reusing existing active session',
+          multiportEnabled: this.multiportConfig.enabled,
+          portCount: this.multiportConfig.maxPorts,
+          basePort: this.multiportConfig.portBase
+        });
+        return;
+      }
+
+      // Create new session only if none exists
+      session = sessionManager.createSession(socket.id, userId);
       
       // Store session info with socket reference
       this.activeSessions.set(session.id, {
@@ -82,17 +153,24 @@ class VoiceHandlerLive {
       // Update session status
       session.updateStatus('active');
 
+      // Start conversation management
+      this.geminiLiveService.startConversation(session.id, data?.voiceName);
+
       // Send session info to client
       socket.emit('session-status', {
         sessionId: session.id,
         status: 'active',
-        message: 'Voice chat session started with Gemini Live'
+        message: 'Voice chat session started with Gemini Live',
+        multiportEnabled: this.multiportConfig.enabled,
+        portCount: this.multiportConfig.maxPorts,
+        basePort: this.multiportConfig.portBase
       });
 
       logger.info('Gemini Live session started successfully', {
         sessionId: session.id,
         socketId: socket.id,
-        userId: userId
+        userId: userId,
+        conversationActive: this.geminiLiveService.conversationState.isActive
       });
 
     } catch (error) {
@@ -254,60 +332,56 @@ class VoiceHandlerLive {
     }
   }
 
-  // Handle audio chunk from Gemini Live with buffering for longer segments
+  // Handle audio chunk from Gemini Live - simplified approach
   async handleAudioChunkFromGemini(audioData) {
     try {
-      // Find the session that should receive this audio
-      // For now, we'll send to all active sessions
+      // Gemini Live sends complete audio responses, not streaming chunks
+      // So we'll send each complete response as properly chunked audio
+      
+      if (this.activeSessions.size === 0) {
+        logger.warn('No active sessions found for audio response');
+        return;
+      }
+      
       for (const [sessionId, sessionInfo] of this.activeSessions) {
         const { socket } = sessionInfo;
         
-        if (socket && socket.connected) {
-          // Initialize buffer for this session if it doesn't exist
-          if (!this.audioBuffers.has(sessionId)) {
-            this.audioBuffers.set(sessionId, {
-              chunks: [],
-              totalDuration: 0,
-              lastSentTime: Date.now()
-            });
-          }
+        if (!socket) {
+          logger.warn('No socket found for session', { sessionId });
+          continue;
+        }
+        
+        if (!socket.connected) {
+          logger.warn('Socket not connected for session', { sessionId });
+          continue;
+        }
+        
+        logger.info('Received complete audio response from Gemini Live', {
+          sessionId,
+          audioDataSize: audioData.length,
+          activeSessionsCount: this.activeSessions.size
+        });
           
-          const buffer = this.audioBuffers.get(sessionId);
-          
-          // Add this audio chunk to the buffer
-          buffer.chunks.push(audioData);
-          
-          // Estimate duration (rough calculation: 1 second ≈ 44100 samples * 2 bytes)
-          const estimatedDuration = this.estimateAudioDuration(audioData);
-          buffer.totalDuration += estimatedDuration;
-          
-          logger.info('Buffering audio chunk', {
-            sessionId,
-            chunkDuration: estimatedDuration,
-            totalBufferedDuration: buffer.totalDuration,
-            bufferThreshold: this.bufferThreshold,
-            chunksInBuffer: buffer.chunks.length
-          });
-          
-          // Check if we have enough audio to send a longer segment
-          if (buffer.totalDuration >= this.bufferThreshold || 
-              (Date.now() - buffer.lastSentTime) > 2000) { // Force send after 2 seconds
-            
-            // Combine all buffered chunks into one longer audio segment
-            const combinedAudio = this.combineAudioChunks(buffer.chunks);
-            
-            // Split the combined audio into larger chunks for streaming
-            const chunks = this.splitAudioIntoChunks(combinedAudio, 8192); // Larger chunk size
-            
-            logger.info('Sending buffered audio segment', {
+        // Split the complete audio response into reasonable chunks for streaming
+        const chunks = this.splitAudioIntoChunks(audioData, 16384); // 16KB chunks
+        
+        logger.info('Streaming audio response to client', {
+          sessionId,
+          totalChunks: chunks.length,
+          averageChunkSize: Math.round(audioData.length / chunks.length)
+        });
+
+                  // Stream chunks using EFFICIENT MULTIPORT
+          if (this.multiportConfig.enabled) {
+            await this.streamChunksMultiport(socket, sessionId, chunks);
+          } else {
+            // Fallback to sequential transmission
+            logger.info('Starting sequential chunk streaming', {
               sessionId,
               totalChunks: chunks.length,
-              chunkSize: chunks[0]?.length || 0,
-              totalDuration: buffer.totalDuration,
-              segmentsInBuffer: buffer.chunks.length
+              chunkSize: 16384
             });
-
-            // Stream chunks to client
+            
             for (let i = 0; i < chunks.length; i++) {
               const chunk = chunks[i];
               const isLastChunk = i === chunks.length - 1;
@@ -321,22 +395,33 @@ class VoiceHandlerLive {
                 progress: Math.round(((i + 1) / chunks.length) * 100) + '%'
               });
 
-              // Small delay between chunks for smooth streaming
-              await new Promise(resolve => setTimeout(resolve, 20));
-            }
+              logger.debug('Chunk transmitted', {
+                sessionId,
+                chunkIndex: i,
+                totalChunks: chunks.length,
+                isLastChunk
+              });
 
-            // Send completion signal
-            socket.emit('audio-complete', {
+              // Ensure sequential transmission with proper delay
+              await new Promise(resolve => setTimeout(resolve, 150));
+            }
+            
+            logger.info('Sequential chunk streaming completed', {
               sessionId,
               totalChunks: chunks.length
             });
-            
-            // Reset buffer
-            buffer.chunks = [];
-            buffer.totalDuration = 0;
-            buffer.lastSentTime = Date.now();
           }
-        }
+
+        // Send completion signal
+        socket.emit('audio-complete', {
+          sessionId,
+          totalChunks: chunks.length
+        });
+        
+        logger.info('Audio response completed successfully', {
+          sessionId,
+          totalChunks: chunks.length
+        });
       }
     } catch (error) {
       logger.error('Failed to handle audio chunk from Gemini', { error: error.message });
@@ -387,6 +472,115 @@ class VoiceHandlerLive {
       }
     } catch (error) {
       logger.error('Failed to handle interruption from Gemini', { error: error.message });
+    }
+  }
+  
+  // Stream chunks using TRUE PARALLEL MULTIPORT
+  async streamChunksMultiport(socket, sessionId, chunks) {
+    try {
+      // Initialize multiport connections if not already done
+      if (!this.multiportConnections.has(sessionId)) {
+        this.initializeMultiportConnections(sessionId);
+      }
+      
+      const connections = this.multiportConnections.get(sessionId);
+      const totalChunks = chunks.length;
+      
+      logger.info('Starting TRUE PARALLEL multiport streaming', {
+        sessionId,
+        totalChunks,
+        portCount: this.multiportConfig.maxPorts,
+        maxConcurrent: this.multiportConfig.maxConcurrentChunks
+      });
+      
+      // DISTRIBUTE CHUNKS ACROSS PORTS FOR PARALLEL TRANSMISSION
+      const portChunks = Array.from({ length: this.multiportConfig.maxPorts }, () => []);
+      
+      // Round-robin distribution: chunk 0→port 0, chunk 1→port 1, chunk 2→port 2, chunk 3→port 0...
+      for (let i = 0; i < chunks.length; i++) {
+        const portId = i % this.multiportConfig.maxPorts;
+        portChunks[portId].push({
+          chunk: chunks[i],
+          index: i,
+          isLastChunk: i === chunks.length - 1
+        });
+      }
+      
+      // TRANSMIT CHUNKS IN PARALLEL ACROSS ALL PORTS
+      const transmissionPromises = portChunks.map(async (portChunkList, portId) => {
+        for (let j = 0; j < portChunkList.length; j++) {
+          const { chunk, index, isLastChunk } = portChunkList[j];
+          
+          // Add small stagger per port to prevent overwhelming
+          const portDelay = portId * this.multiportConfig.chunkDelay;
+          await new Promise(resolve => setTimeout(resolve, portDelay));
+          
+          // Emit chunk with port information
+          socket.emit('audio-chunk', {
+            sessionId,
+            chunkIndex: index,
+            totalChunks: chunks.length,
+            isLastChunk,
+            audioData: chunk,
+            progress: Math.round(((index + 1) / chunks.length) * 100) + '%',
+            portId: portId,
+            portNumber: this.multiportConfig.portBase + portId
+          });
+          
+          // Update port statistics
+          if (connections && connections.ports[portId]) {
+            connections.ports[portId].chunkCount++;
+            connections.ports[portId].lastChunkTime = Date.now();
+          }
+          
+          logger.debug('PARALLEL chunk transmitted', {
+            sessionId,
+            chunkIndex: index,
+            portId,
+            portNumber: this.multiportConfig.portBase + portId,
+            totalChunks
+          });
+          
+          // Minimal delay for parallel transmission
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+      });
+      
+      // EXECUTE ALL PORT TRANSMISSIONS IN PARALLEL
+      await Promise.all(transmissionPromises);
+      
+      logger.info('TRUE PARALLEL multiport streaming completed', {
+        sessionId,
+        totalChunks,
+        portStats: connections?.ports.map(p => ({
+          portId: p.portId,
+          chunkCount: p.chunkCount
+        }))
+      });
+      
+    } catch (error) {
+      logger.error('Failed to stream chunks via multiport', { 
+        sessionId, 
+        error: error.message 
+      });
+      
+      // Fallback to sequential transmission on error
+      logger.info('Falling back to sequential transmission', { sessionId });
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        const isLastChunk = i === chunks.length - 1;
+        
+        socket.emit('audio-chunk', {
+          sessionId,
+          chunkIndex: i,
+          totalChunks: chunks.length,
+          isLastChunk,
+          audioData: chunk,
+          progress: Math.round(((i + 1) / chunks.length) * 100) + '%'
+        });
+        
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
     }
   }
 
@@ -452,10 +646,32 @@ class VoiceHandlerLive {
         sessionInfo.audioQueue = [];
       }
 
+      // Clear audio buffer for this session
+      if (this.audioBuffers.has(session.id)) {
+        this.audioBuffers.delete(session.id);
+        logger.info('Cleared audio buffer due to interruption', { sessionId: session.id });
+      }
+
       // Clear audio queue in Gemini Live service
       this.geminiLiveService.clearAudioQueue();
 
-      logger.info('User interruption handled', { sessionId: session.id });
+      // Send interruption to Gemini Live session
+      if (this.geminiLiveService.session) {
+        try {
+          this.geminiLiveService.session.interrupt();
+          logger.info('Sent interruption to Gemini Live session', { sessionId: session.id });
+        } catch (interruptError) {
+          logger.warn('Failed to interrupt Gemini session', { error: interruptError.message });
+        }
+      }
+
+      // Send confirmation to client
+      socket.emit('interruption-handled', {
+        sessionId: session.id,
+        timestamp: new Date().toISOString()
+      });
+
+      logger.info('User interruption handled successfully', { sessionId: session.id });
 
     } catch (error) {
       logger.error('Failed to handle interruption', {
@@ -476,15 +692,24 @@ class VoiceHandlerLive {
 
       logger.logWebSocketEvent('end-conversation', socket.id, data);
 
-      // Flush any remaining buffered audio
-      await this.flushAudioBuffer(session.id, socket);
+      // End conversation management
+      this.geminiLiveService.endConversation();
 
       // Clean up session
       this.activeSessions.delete(session.id);
-      this.audioBuffers.delete(session.id);
+      
+      // Clean up multiport connections for this session
+      if (this.multiportConnections.has(session.id)) {
+        this.multiportConnections.delete(session.id);
+        logger.info('Multiport connections cleaned up', { sessionId: session.id });
+      }
+      
       sessionManager.endSession(session.id);
 
-      logger.info('Conversation ended', { sessionId: session.id });
+      logger.info('Conversation ended', { 
+        sessionId: session.id,
+        conversationStats: this.geminiLiveService.getConversationStats()
+      });
 
     } catch (error) {
       logger.error('Failed to end conversation', {
@@ -495,55 +720,32 @@ class VoiceHandlerLive {
     }
   }
 
-  // Flush any remaining buffered audio
-  async flushAudioBuffer(sessionId, socket) {
-    try {
-      const buffer = this.audioBuffers.get(sessionId);
-      if (buffer && buffer.chunks.length > 0) {
-        logger.info('Flushing remaining buffered audio', {
-          sessionId,
-          chunksInBuffer: buffer.chunks.length,
-          totalDuration: buffer.totalDuration
-        });
-        
-        // Combine remaining chunks
-        const combinedAudio = this.combineAudioChunks(buffer.chunks);
-        const chunks = this.splitAudioIntoChunks(combinedAudio, 8192);
-        
-        // Send remaining audio
-        for (let i = 0; i < chunks.length; i++) {
-          const chunk = chunks[i];
-          const isLastChunk = i === chunks.length - 1;
-          
-          socket.emit('audio-chunk', {
-            sessionId,
-            chunkIndex: i,
-            totalChunks: chunks.length,
-            isLastChunk,
-            audioData: chunk,
-            progress: Math.round(((i + 1) / chunks.length) * 100) + '%'
-          });
-          
-          await new Promise(resolve => setTimeout(resolve, 20));
-        }
-        
-        socket.emit('audio-complete', {
-          sessionId,
-          totalChunks: chunks.length
-        });
-      }
-    } catch (error) {
-      logger.error('Failed to flush audio buffer', { sessionId, error: error.message });
-    }
-  }
+
 
   // Estimate audio duration from base64 data
   estimateAudioDuration(audioData) {
     try {
       const audioBuffer = Buffer.from(audioData, 'base64');
-      // For 44.1kHz, 16-bit, mono: 1 second = 44100 * 2 bytes
-      const bytesPerSecond = 44100 * 2;
-      return audioBuffer.length / bytesPerSecond;
+      
+      // Check if it's a WAV file
+      const isWAV = audioBuffer.length >= 12 && 
+                   audioBuffer.slice(0, 4).toString() === 'RIFF' &&
+                   audioBuffer.slice(8, 12).toString() === 'WAVE';
+      
+      if (isWAV && audioBuffer.length >= 44) {
+        // Extract WAV parameters from header
+        const sampleRate = audioBuffer.readUInt32LE(24);
+        const channels = audioBuffer.readUInt16LE(22);
+        const bitsPerSample = audioBuffer.readUInt16LE(34);
+        const dataSize = audioBuffer.length - 44; // Subtract WAV header
+        
+        const bytesPerSecond = sampleRate * channels * (bitsPerSample / 8);
+        return dataSize / bytesPerSecond;
+      } else {
+        // For raw PCM at 48kHz, 16-bit, mono: 1 second = 48000 * 2 bytes
+        const bytesPerSecond = 48000 * 2;
+        return audioBuffer.length / bytesPerSecond;
+      }
     } catch (error) {
       logger.error('Failed to estimate audio duration', { error: error.message });
       return 0.1; // Default fallback
@@ -556,7 +758,7 @@ class VoiceHandlerLive {
       if (chunks.length === 0) return null;
       if (chunks.length === 1) return chunks[0];
       
-      // For WAV files, we need to handle headers properly
+      // Check if first chunk is WAV
       const firstChunk = Buffer.from(chunks[0], 'base64');
       const isWAV = firstChunk.length >= 12 && 
                    firstChunk.slice(0, 4).toString() === 'RIFF' &&
@@ -578,6 +780,7 @@ class VoiceHandlerLive {
         header.copy(newHeader, 0, 0, 4); // RIFF
         newHeader.writeUInt32LE(totalSize, 4); // File size
         header.copy(newHeader, 8, 8, 44); // Rest of header
+        newHeader.writeUInt32LE(combinedData.length, 40); // Update data chunk size
         
         const combinedWAV = Buffer.concat([newHeader, combinedData]);
         return combinedWAV.toString('base64');
@@ -593,7 +796,53 @@ class VoiceHandlerLive {
     }
   }
 
-  // Split audio into chunks for streaming
+  // Initialize multiport connections for a session
+  initializeMultiportConnections(sessionId) {
+    if (!this.multiportConfig.enabled) return;
+    
+    const connections = {
+      ports: [],
+      currentPort: 0,
+      chunkQueue: [],
+      activeChunks: 0
+    };
+    
+    // Create virtual ports for chunk distribution
+    for (let i = 0; i < this.multiportConfig.maxPorts; i++) {
+      connections.ports.push({
+        portId: i,
+        portNumber: this.multiportConfig.portBase + i,
+        chunkCount: 0,
+        lastChunkTime: 0
+      });
+    }
+    
+    this.multiportConnections.set(sessionId, connections);
+    
+    logger.info('Multiport connections initialized', {
+      sessionId,
+      portCount: this.multiportConfig.maxPorts,
+      basePort: this.multiportConfig.portBase
+    });
+  }
+  
+  // Get next available port for chunk transmission
+  getNextPort(sessionId) {
+    const connections = this.multiportConnections.get(sessionId);
+    if (!connections) return 0;
+    
+    if (this.multiportConfig.chunkDistribution === 'round-robin') {
+      // Round-robin distribution
+      const port = connections.ports[connections.currentPort];
+      connections.currentPort = (connections.currentPort + 1) % connections.ports.length;
+      return port.portId;
+    } else {
+      // Size-based distribution (for future implementation)
+      return connections.currentPort;
+    }
+  }
+  
+  // Split audio into chunks for streaming with multiport support
   splitAudioIntoChunks(audioData, chunkSize = 1024) {
     try {
       if (!audioData) {
@@ -610,9 +859,30 @@ class VoiceHandlerLive {
                    audioBuffer.slice(8, 12).toString() === 'WAVE';
 
       if (isWAV) {
-        logger.info('Detected WAV format, sending as single chunk to preserve headers');
-        // For WAV files, send the entire file as one chunk to preserve headers
-        chunks.push(audioBuffer.toString('base64'));
+        logger.info('Detected WAV format, chunking while preserving playability');
+        // For WAV files, we need to create proper WAV chunks
+        // Each chunk will be a complete mini-WAV file with its own header
+        const header = audioBuffer.slice(0, 44); // WAV header
+        const audioData = audioBuffer.slice(44); // Audio data
+        
+        // Split audio data into chunks
+        const dataChunkSize = chunkSize - 44; // Leave room for WAV header
+        for (let i = 0; i < audioData.length; i += dataChunkSize) {
+          const dataChunk = audioData.slice(i, Math.min(i + dataChunkSize, audioData.length));
+          
+          // Create new WAV file for this chunk
+          const chunkHeader = Buffer.alloc(44);
+          header.copy(chunkHeader); // Copy original header
+          
+          // Update header with chunk-specific sizes
+          const chunkFileSize = 36 + dataChunk.length;
+          chunkHeader.writeUInt32LE(chunkFileSize, 4); // File size
+          chunkHeader.writeUInt32LE(dataChunk.length, 40); // Data chunk size
+          
+          // Combine header with data chunk
+          const completeChunk = Buffer.concat([chunkHeader, dataChunk]);
+          chunks.push(completeChunk.toString('base64'));
+        }
       } else {
         // For non-WAV files, split into chunks as before
         for (let i = 0; i < audioBuffer.length; i += chunkSize) {
@@ -625,7 +895,8 @@ class VoiceHandlerLive {
       logger.info('Audio split into chunks', {
         totalChunks: chunks.length,
         chunkSize: chunkSize,
-        isWAV: isWAV
+        isWAV: isWAV,
+        multiportEnabled: this.multiportConfig.enabled
       });
 
       return chunks;
@@ -651,6 +922,7 @@ class VoiceHandlerLive {
       // Clear active sessions and audio buffers
       this.activeSessions.clear();
       this.audioBuffers.clear();
+      this.multiportConnections.clear();
 
       // Close Gemini Live service
       await this.geminiLiveService.closeSession();
@@ -666,7 +938,14 @@ class VoiceHandlerLive {
     return {
       activeSessions: this.activeSessions.size,
       geminiLiveConnected: this.geminiLiveService.isConnected,
-      serviceType: 'Gemini Live API'
+      serviceType: 'Gemini Live API',
+      multiport: {
+        enabled: this.multiportConfig.enabled,
+        maxPorts: this.multiportConfig.maxPorts,
+        portBase: this.multiportConfig.portBase,
+        chunkDelay: this.multiportConfig.chunkDelay,
+        activeConnections: this.multiportConnections.size
+      }
     };
   }
 }

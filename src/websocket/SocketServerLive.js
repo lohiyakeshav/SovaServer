@@ -9,6 +9,9 @@ class SocketServerLive {
   constructor() {
     this.io = null;
     this.voiceHandler = new VoiceHandlerLive();
+    this.connectionAttempts = new Map(); // Track connection attempts per IP
+    this.maxConnectionsPerIP = 5; // Maximum connections per IP address
+    this.connectionWindow = 60000; // 1 minute window for rate limiting
   }
 
   // Initialize Socket.IO server
@@ -21,7 +24,10 @@ class SocketServerLive {
       pingTimeout: config.websocket.pingTimeout,
       pingInterval: config.websocket.pingInterval,
       maxHttpBufferSize: config.websocket.maxPayload,
-      transports: ['websocket', 'polling']
+      transports: ['websocket', 'polling'],
+      allowEIO3: false, // Disable Engine.IO v3 compatibility
+      connectTimeout: 45000, // 45 second connection timeout
+      maxHttpBufferSize: 10 * 1024 * 1024, // 10MB max payload
     });
 
     this.setupMiddleware();
@@ -36,18 +42,51 @@ class SocketServerLive {
 
   // Setup Socket.IO middleware
   setupMiddleware() {
-    // Authentication middleware
+    // Rate limiting middleware
     this.io.use((socket, next) => {
+      const clientIP = socket.handshake.address;
+      const now = Date.now();
+      
+      // Clean up old connection attempts
+      if (this.connectionAttempts.has(clientIP)) {
+        const attempts = this.connectionAttempts.get(clientIP);
+        const recentAttempts = attempts.filter(timestamp => now - timestamp < this.connectionWindow);
+        
+        if (recentAttempts.length === 0) {
+          this.connectionAttempts.delete(clientIP);
+        } else {
+          this.connectionAttempts.set(clientIP, recentAttempts);
+        }
+      }
+      
+      // Check if too many connection attempts
+      const attempts = this.connectionAttempts.get(clientIP) || [];
+      if (attempts.length >= this.maxConnectionsPerIP) {
+        logger.warn('Rate limit exceeded for IP', { 
+          ip: clientIP, 
+          attempts: attempts.length,
+          socketId: socket.id 
+        });
+        return next(new Error('Too many connection attempts. Please wait before trying again.'));
+      }
+      
+      // Track this connection attempt
+      attempts.push(now);
+      this.connectionAttempts.set(clientIP, attempts);
+      
+      // Authentication middleware
       const auth = socket.handshake.auth || {};
       const token = auth.token;
       
       // Add authentication logic here
       // For now, we'll accept all connections
       socket.userId = auth.userId || null;
+      socket.clientIP = clientIP;
       
       logger.logWebSocketEvent('connection-attempt', socket.id, {
         userId: socket.userId,
-        address: socket.handshake.address
+        address: clientIP,
+        attempts: attempts.length
       });
       
       next();
@@ -68,9 +107,24 @@ class SocketServerLive {
   // Setup main event handlers
   setupEventHandlers() {
     this.io.on('connection', (socket) => {
+      // Check if this IP already has too many active connections
+      const activeConnections = Array.from(this.io.sockets.sockets.values())
+        .filter(s => s.clientIP === socket.clientIP).length;
+      
+      if (activeConnections > this.maxConnectionsPerIP) {
+        logger.warn('Too many active connections for IP', {
+          ip: socket.clientIP,
+          activeConnections,
+          socketId: socket.id
+        });
+        socket.disconnect(true);
+        return;
+      }
+
       logger.logWebSocketEvent('connected', socket.id, {
         userId: socket.userId,
-        transport: socket.conn.transport.name
+        transport: socket.conn.transport.name,
+        clientIP: socket.clientIP
       });
 
       // Setup voice chat handlers with Gemini Live
@@ -78,15 +132,27 @@ class SocketServerLive {
 
       // Handle disconnection
       socket.on('disconnect', (reason) => {
-        logger.logWebSocketEvent('disconnected', socket.id, { reason });
+        logger.logWebSocketEvent('disconnected', socket.id, { 
+          reason,
+          clientIP: socket.clientIP
+        });
         sessionManager.handleSocketDisconnect(socket.id);
+        
+        // Clean up connection attempts for this IP if no active connections
+        const remainingConnections = Array.from(this.io.sockets.sockets.values())
+          .filter(s => s.clientIP === socket.clientIP).length;
+        
+        if (remainingConnections === 0) {
+          this.connectionAttempts.delete(socket.clientIP);
+        }
       });
 
       // Handle connection errors
       socket.on('connect_error', (error) => {
         logger.error('Socket connection error', {
           socketId: socket.id,
-          error: error.message
+          error: error.message,
+          clientIP: socket.clientIP
         });
       });
 
@@ -240,10 +306,22 @@ class SocketServerLive {
       logger.info('Shutting down WebSocket server...');
       
       // Cleanup voice handler
-      await this.voiceHandler.cleanup();
+      if (this.voiceHandler) {
+        await this.voiceHandler.cleanup();
+      }
+      
+      // Clear connection attempts tracking
+      if (this.connectionAttempts) {
+        this.connectionAttempts.clear();
+      }
       
       // Close all connections
       if (this.io) {
+        // Disconnect all clients gracefully
+        this.io.sockets.sockets.forEach((socket) => {
+          socket.disconnect(true);
+        });
+        
         this.io.close();
       }
       
@@ -262,15 +340,53 @@ class SocketServerLive {
     const sockets = this.io.sockets.sockets;
     const connections = Array.from(sockets.values());
     
+    // Group connections by IP
+    const connectionsByIP = {};
+    connections.forEach(socket => {
+      const ip = socket.clientIP || 'unknown';
+      connectionsByIP[ip] = (connectionsByIP[ip] || 0) + 1;
+    });
+    
     return {
       totalConnections: connections.length,
+      connectionsByIP,
       transports: {
         websocket: connections.filter(s => s.conn.transport.name === 'websocket').length,
         polling: connections.filter(s => s.conn.transport.name === 'polling').length
       },
-      serviceStatus: this.voiceHandler.getStatus(),
-      uptime: process.uptime()
+      serviceStatus: this.voiceHandler ? this.voiceHandler.getStatus() : { error: 'Voice handler not initialized' },
+      uptime: process.uptime(),
+      rateLimitStats: {
+        trackedIPs: this.connectionAttempts ? this.connectionAttempts.size : 0,
+        maxConnectionsPerIP: this.maxConnectionsPerIP || 5
+      }
     };
+  }
+
+  // Cleanup old connection attempts (call this periodically)
+  cleanupOldAttempts() {
+    if (!this.connectionAttempts) {
+      return;
+    }
+    
+    const now = Date.now();
+    let cleanedCount = 0;
+    
+    for (const [ip, attempts] of this.connectionAttempts.entries()) {
+      const recentAttempts = attempts.filter(timestamp => now - timestamp < this.connectionWindow);
+      
+      if (recentAttempts.length === 0) {
+        this.connectionAttempts.delete(ip);
+        cleanedCount++;
+      } else if (recentAttempts.length !== attempts.length) {
+        this.connectionAttempts.set(ip, recentAttempts);
+        cleanedCount++;
+      }
+    }
+    
+    if (cleanedCount > 0) {
+      logger.debug(`Cleaned up ${cleanedCount} old connection attempts`);
+    }
   }
 }
 

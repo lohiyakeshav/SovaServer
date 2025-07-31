@@ -78,6 +78,13 @@ server.listen(PORT, HOST, () => {
     pid: process.pid
   });
   
+  // Setup periodic cleanup for WebSocket connection tracking
+  setInterval(() => {
+    if (socketServer && socketServer.cleanupOldAttempts) {
+      socketServer.cleanupOldAttempts();
+    }
+  }, 300000); // Clean up every 5 minutes
+  
   console.log(`
 ╔═══════════════════════════════════════════════════════════════╗
 ║                                                               ║
@@ -110,6 +117,36 @@ server.listen(PORT, HOST, () => {
 ║                                                               ║
 ╚═══════════════════════════════════════════════════════════════╝
   `);
+}).on('error', (error) => {
+  if (error.code === 'EADDRINUSE') {
+    logger.error(`Port ${PORT} is already in use. Please stop the existing server or use a different port.`, {
+      port: PORT,
+      error: error.message
+    });
+    console.error(`
+╔═══════════════════════════════════════════════════════════════╗
+║                                                               ║
+║   ❌ PORT CONFLICT ERROR                                      ║
+║                                                               ║
+║   Port ${PORT} is already in use.                            ║
+║                                                               ║
+║   Solutions:                                                  ║
+║   1. Kill the existing process:                              ║
+║      lsof -ti:${PORT} | xargs kill -9                        ║
+║                                                               ║
+║   2. Use a different port:                                   ║
+║      PORT=3001 npm run dev                                   ║
+║                                                               ║
+║   3. Check for other servers:                                ║
+║      lsof -i :${PORT}                                        ║
+║                                                               ║
+╚═══════════════════════════════════════════════════════════════╝
+    `);
+  } else {
+    logger.error('Server failed to start', { error: error.message });
+    console.error('❌ Server failed to start:', error.message);
+  }
+  process.exit(1);
 });
 
 // Export server for testing
