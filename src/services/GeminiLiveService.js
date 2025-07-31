@@ -315,24 +315,9 @@ class GeminiLiveService {
       // Update conversation state with voice name
       this.conversationState.voiceName = voice;
 
-      // Send system prompt immediately after session initialization
-      if (this.isConnected && this.session) {
-        try {
-          const systemPrompt = this.getSystemPrompt();
-          logger.info('Sending system prompt to establish Sova identity', {
-            promptLength: systemPrompt.length,
-            sessionId: this.conversationState.sessionId
-          });
-          
-          await this.session.sendRealtimeInput({
-            text: systemPrompt
-          });
-          
-          logger.info('System prompt sent successfully to establish Sova identity');
-        } catch (promptError) {
-          logger.error('Failed to send system prompt', { error: promptError.message });
-        }
-      }
+      // Note: System prompt will be sent with the first user message instead of automatically
+      // This prevents unwanted AI responses when the session is just initialized
+      logger.info('Session initialized - system prompt will be sent with first user message');
 
       logger.info('Gemini Live session initialized', { 
         model: model,
