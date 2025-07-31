@@ -9,14 +9,33 @@ class VoiceHandlerLive {
     this.activeSessions = new Map(); // sessionId -> session info
     // Removed complex buffering - Gemini Live sends complete responses
     
+    // CONVERSATION-OPTIMIZED CHUNKING CONFIGURATION
+    this.chunkingConfig = {
+      // Target chunk duration for natural conversation flow
+      targetChunkDuration: 2.0, // 2 seconds per chunk for natural speech
+      minChunkDuration: 1.0,    // Minimum 1 second
+      maxChunkDuration: 5.0,    // Maximum 5 seconds
+      
+      // Audio parameters (48kHz, 16-bit, mono)
+      sampleRate: 48000,
+      channels: 1,
+      bitsPerSample: 16,
+      bytesPerSecond: 48000 * 1 * 2, // 96,000 bytes/second
+      
+      // Transmission settings
+      sequentialDelay: 50,  // Reduced from 150ms to 50ms
+      multiportDelay: 10,   // Keep fast multiport
+      maxConcurrentChunks: 12
+    };
+    
     // Multiport chunking configuration
     this.multiportConfig = {
       enabled: true, // ENABLE EFFICIENT MULTIPORT
       maxPorts: 3, // Match frontend ports (0,1,2)
       chunkDistribution: 'round-robin', // Distribute chunks across ports
       portBase: 3000, // Base port for multiport connections
-      chunkDelay: 10, // Fast parallel transmission
-      maxConcurrentChunks: 12 // Allow more concurrent chunks
+      chunkDelay: this.chunkingConfig.multiportDelay, // Use optimized delay
+      maxConcurrentChunks: this.chunkingConfig.maxConcurrentChunks
     };
     
     // Track multiport connections
@@ -332,7 +351,7 @@ class VoiceHandlerLive {
     }
   }
 
-  // Handle audio chunk from Gemini Live - simplified approach
+  // Handle audio chunk from Gemini Live
   async handleAudioChunkFromGemini(audioData) {
     try {
       // Gemini Live sends complete audio responses, not streaming chunks
@@ -362,55 +381,59 @@ class VoiceHandlerLive {
           activeSessionsCount: this.activeSessions.size
         });
           
-        // Split the complete audio response into reasonable chunks for streaming
-        const chunks = this.splitAudioIntoChunks(audioData, 16384); // 16KB chunks
+        // Calculate optimal chunk size for this audio response
+        const optimalChunkSize = this.calculateOptimalChunkSize(audioData);
+        
+        // Split the complete audio response into chunks of optimal size
+        const chunks = this.splitAudioIntoChunks(audioData, optimalChunkSize);
         
         logger.info('Streaming audio response to client', {
           sessionId,
           totalChunks: chunks.length,
-          averageChunkSize: Math.round(audioData.length / chunks.length)
+          averageChunkSize: Math.round(audioData.length / chunks.length),
+          chunkDuration: (optimalChunkSize / this.chunkingConfig.bytesPerSecond).toFixed(2) + 's'
         });
 
-                  // Stream chunks using EFFICIENT MULTIPORT
-          if (this.multiportConfig.enabled) {
-            await this.streamChunksMultiport(socket, sessionId, chunks);
-          } else {
-            // Fallback to sequential transmission
-            logger.info('Starting sequential chunk streaming', {
+        // Stream chunks using EFFICIENT MULTIPORT
+        if (this.multiportConfig.enabled) {
+          await this.streamChunksMultiport(socket, sessionId, chunks);
+        } else {
+          // Fallback to sequential transmission
+          logger.info('Starting sequential chunk streaming', {
+            sessionId,
+            totalChunks: chunks.length,
+            chunkSize: optimalChunkSize
+          });
+          
+          for (let i = 0; i < chunks.length; i++) {
+            const chunk = chunks[i];
+            const isLastChunk = i === chunks.length - 1;
+            
+            socket.emit('audio-chunk', {
               sessionId,
+              chunkIndex: i,
               totalChunks: chunks.length,
-              chunkSize: 16384
+              isLastChunk,
+              audioData: chunk,
+              progress: Math.round(((i + 1) / chunks.length) * 100) + '%'
             });
-            
-            for (let i = 0; i < chunks.length; i++) {
-              const chunk = chunks[i];
-              const isLastChunk = i === chunks.length - 1;
-              
-              socket.emit('audio-chunk', {
-                sessionId,
-                chunkIndex: i,
-                totalChunks: chunks.length,
-                isLastChunk,
-                audioData: chunk,
-                progress: Math.round(((i + 1) / chunks.length) * 100) + '%'
-              });
 
-              logger.debug('Chunk transmitted', {
-                sessionId,
-                chunkIndex: i,
-                totalChunks: chunks.length,
-                isLastChunk
-              });
-
-              // Ensure sequential transmission with proper delay
-              await new Promise(resolve => setTimeout(resolve, 150));
-            }
-            
-            logger.info('Sequential chunk streaming completed', {
+            logger.debug('Chunk transmitted', {
               sessionId,
-              totalChunks: chunks.length
+              chunkIndex: i,
+              totalChunks: chunks.length,
+              isLastChunk
             });
+
+            // Ensure sequential transmission with optimized delay
+            await new Promise(resolve => setTimeout(resolve, this.chunkingConfig.sequentialDelay));
           }
+          
+          logger.info('Sequential chunk streaming completed', {
+            sessionId,
+            totalChunks: chunks.length
+          });
+        }
 
         // Send completion signal
         socket.emit('audio-complete', {
@@ -796,6 +819,52 @@ class VoiceHandlerLive {
     }
   }
 
+  // Calculate optimal chunk size based on audio duration
+  calculateOptimalChunkSize(audioData) {
+    try {
+      const audioBuffer = Buffer.from(audioData, 'base64');
+      const totalDuration = this.estimateAudioDuration(audioData);
+      
+      // Calculate target chunk size based on duration
+      let targetChunkDuration = this.chunkingConfig.targetChunkDuration;
+      
+      // Adjust chunk duration based on total audio length
+      if (totalDuration <= 3.0) {
+        // Short responses: use larger chunks (1-2 seconds)
+        targetChunkDuration = Math.max(1.0, totalDuration / 2);
+      } else if (totalDuration <= 10.0) {
+        // Medium responses: use 2-3 second chunks
+        targetChunkDuration = 2.5;
+      } else {
+        // Long responses: use 3-5 second chunks
+        targetChunkDuration = Math.min(5.0, totalDuration / 4);
+      }
+      
+      // Calculate chunk size in bytes
+      const chunkSizeBytes = Math.round(targetChunkDuration * this.chunkingConfig.bytesPerSecond);
+      
+      // Ensure chunk size is reasonable
+      const minChunkSize = this.chunkingConfig.minChunkDuration * this.chunkingConfig.bytesPerSecond;
+      const maxChunkSize = this.chunkingConfig.maxChunkDuration * this.chunkingConfig.bytesPerSecond;
+      
+      const finalChunkSize = Math.max(minChunkSize, Math.min(maxChunkSize, chunkSizeBytes));
+      
+      logger.info('Calculated optimal chunk size', {
+        totalDuration: totalDuration.toFixed(2) + 's',
+        targetChunkDuration: targetChunkDuration.toFixed(2) + 's',
+        chunkSizeBytes: finalChunkSize,
+        chunkSizeKB: Math.round(finalChunkSize / 1024),
+        estimatedChunks: Math.ceil(audioBuffer.length / finalChunkSize)
+      });
+      
+      return finalChunkSize;
+    } catch (error) {
+      logger.error('Failed to calculate optimal chunk size', { error: error.message });
+      // Fallback to 2-second chunks
+      return this.chunkingConfig.targetChunkDuration * this.chunkingConfig.bytesPerSecond;
+    }
+  }
+
   // Initialize multiport connections for a session
   initializeMultiportConnections(sessionId) {
     if (!this.multiportConfig.enabled) return;
@@ -843,11 +912,16 @@ class VoiceHandlerLive {
   }
   
   // Split audio into chunks for streaming with multiport support
-  splitAudioIntoChunks(audioData, chunkSize = 1024) {
+  splitAudioIntoChunks(audioData, chunkSize = null) {
     try {
       if (!audioData) {
         logger.warn('No audio data provided for chunking');
         return [];
+      }
+
+      // Use default chunk size if none provided (2 seconds of audio)
+      if (!chunkSize) {
+        chunkSize = this.chunkingConfig.targetChunkDuration * this.chunkingConfig.bytesPerSecond;
       }
 
       const audioBuffer = Buffer.from(audioData, 'base64');
@@ -895,6 +969,8 @@ class VoiceHandlerLive {
       logger.info('Audio split into chunks', {
         totalChunks: chunks.length,
         chunkSize: chunkSize,
+        chunkSizeKB: Math.round(chunkSize / 1024),
+        chunkDuration: (chunkSize / this.chunkingConfig.bytesPerSecond).toFixed(2) + 's',
         isWAV: isWAV,
         multiportEnabled: this.multiportConfig.enabled
       });
